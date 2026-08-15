@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+Rimport { Injectable, Logger } from '@nestjs/common';
 import { Server } from 'socket.io';
 
 export enum GameStatus {
@@ -13,7 +13,7 @@ export class GameService {
   private server: Server;
   
   private status: GameStatus = GameStatus.WAITING;
-  private countdown: number = 15;
+  private countdown: number = 10;
   private currentMultiplier: number = 1.0;
   private crashPoint: number = 1.0;
   private startTime: number = 0;
@@ -23,14 +23,14 @@ export class GameService {
   public setServer(server: Server) {
     this.server = server;
     // Start the game loop when server is attached
-    if (this.status === GameStatus.WAITING && this.countdown === 15) {
+    if (this.status === GameStatus.WAITING && this.countdown === 10) {
       this.startCountdown();
     }
   }
 
   private startCountdown() {
     this.status = GameStatus.WAITING;
-    this.countdown = 15;
+    this.countdown = 10;
     this.currentMultiplier = 1.0;
     
     this.logger.log('Starting countdown...');
