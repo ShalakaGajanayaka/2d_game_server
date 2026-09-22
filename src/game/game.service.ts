@@ -39,7 +39,9 @@ export class GameService {
   private startTime: number = 0;
   private timer: NodeJS.Timeout | null = null;
   private gameLoopTimer: NodeJS.Timeout | null = null;
+  private botStreamTimer: NodeJS.Timeout | null = null;
   private currentRoundBets: LiveBet[] = [];
+  private pendingRoundBots: LiveBet[] = [];
 
   public setServer(server: Server) {
     this.server = server;
@@ -51,7 +53,7 @@ export class GameService {
 
   private generateRoundBots(): LiveBet[] {
     const shuffled = [...BOT_NAMES].sort(() => 0.5 - Math.random());
-    const count = Math.floor(Math.random() * 7) + 14; // 14 to 20 bots per round
+    const count = Math.floor(Math.random() * 8) + 18; // 18 to 25 bots per round
     const selected = shuffled.slice(0, count);
 
     return selected.map((name, index) => {
@@ -88,19 +90,58 @@ export class GameService {
     this.status = GameStatus.WAITING;
     this.countdown = 10;
     this.currentMultiplier = 1.0;
-    this.currentRoundBets = this.generateRoundBots();
     
-    this.logger.log(`Starting countdown with ${this.currentRoundBets.length} live bets...`);
+    // Generate pool of 18 - 25 bots
+    const allBots = this.generateRoundBots();
+    // Seed initial 2-3 early bets so list isn't empty
+    this.currentRoundBets = allBots.slice(0, 3);
+    this.pendingRoundBots = allBots.slice(3);
+
+    this.logger.log(`Starting countdown. Initial bets: ${this.currentRoundBets.length}, Pending stream: ${this.pendingRoundBots.length}`);
     this.broadcastState();
 
     if (this.timer) clearInterval(this.timer);
-    
+    if (this.botStreamTimer) clearInterval(this.botStreamTimer);
+
+    // Stream incoming bets every 400-500ms to simulate realistic crowd joining
+    this.botStreamTimer = setInterval(() => {
+      if (this.status === GameStatus.WAITING && this.pendingRoundBots.length > 0) {
+        // Occasionally emit 2 bets when countdown is closer
+        const countToEmit = (this.countdown <= 6 && Math.random() > 0.4 && this.pendingRoundBots.length >= 2) ? 2 : 1;
+        for (let i = 0; i < countToEmit; i++) {
+          const nextBot = this.pendingRoundBots.shift();
+          if (nextBot) {
+            this.currentRoundBets.push(nextBot);
+            if (this.server) {
+              this.server.emit('newLiveBet', nextBot);
+            }
+          }
+        }
+      } else if (this.pendingRoundBots.length === 0 && this.botStreamTimer) {
+        clearInterval(this.botStreamTimer);
+      }
+    }, 450);
+
     this.timer = setInterval(() => {
       this.countdown--;
       this.broadcastState(); // Broadcast every second during countdown
       
+      // Flush any remaining pending bots so everyone is in right before flight
+      if (this.countdown <= 1) {
+        while (this.pendingRoundBots.length > 0) {
+          const nextBot = this.pendingRoundBots.shift();
+          if (nextBot) {
+            this.currentRoundBets.push(nextBot);
+            if (this.server) {
+              this.server.emit('newLiveBet', nextBot);
+            }
+          }
+        }
+      }
+
       if (this.countdown <= 0) {
         clearInterval(this.timer!);
+        if (this.botStreamTimer) clearInterval(this.botStreamTimer);
         this.startGame();
       }
     }, 1000);
@@ -112,7 +153,14 @@ export class GameService {
     this.currentMultiplier = 1.0;
     this.startTime = Date.now();
     
-    this.logger.log(`Game started. Crash point is ${this.crashPoint}`);
+    if (this.botStreamTimer) clearInterval(this.botStreamTimer);
+    // Ensure all pending bets are in
+    while (this.pendingRoundBots.length > 0) {
+      const nextBot = this.pendingRoundBots.shift();
+      if (nextBot) this.currentRoundBets.push(nextBot);
+    }
+
+    this.logger.log(`Game started. Total bets: ${this.currentRoundBets.length}, Crash point: ${this.crashPoint}`);
     
     // Broadcast the START event so clients can begin animation syncing to startTime
     this.broadcastState();
