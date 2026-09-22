@@ -16,16 +16,24 @@ export interface LiveBet {
   cashedOutMultiplier?: number;
 }
 
-const BOT_NAMES = [
-  'alex_99', 'sky_king', 'johnd**', 'aviator_pro', 'kasun_lk',
-  'crypto_whale', 'lucky_girl', 'bet_master', 'sam_fly', 'speedy',
-  'elena_r', 'highroller', 'noob_01', 'pro_pilot', 'user883',
-  'alpha_dog', 'queen_7', 'ace_flyer', 'zenith', 'rocket_man',
-  'vortex', 'falcon', 'shadow_99', 'neo_matrix', 'phoenix',
-  'golden_boy', 'viper', 'matrix_7', 'hazard', 'star_rider'
+const NAME_PREFIXES = [
+  'alex', 'sam', 'johnd', 'crypto', 'sky', 'lucky', 'bet', 'speedy', 'elena',
+  'king', 'queen', 'ace', 'falcon', 'neo', 'shadow', 'zenith', 'rocket', 'viper',
+  'matrix', 'hazard', 'star', 'pilot', 'pro', 'tiger', 'wolf', 'ghost', 'blade',
+  'flash', 'titan', 'dragon', 'dark', 'iron', 'apex', 'zero', 'storm', 'nova',
+  'cyber', 'vortex', 'silver', 'gold', 'alpha', 'omega', 'phantom', 'sonic',
+  'kasun', 'dinuka', 'roshan', 'chaminda', 'saman', 'nimal', 'ravi', 'tharindu'
 ];
 
-const BET_AMOUNTS = [5, 10, 15, 20, 25, 50, 75, 100, 150, 200, 300, 500, 1000];
+const NAME_SUFFIXES = [
+  '**', '_99', '_lk', '_pro', '_vip', '_777', '_x', '_01', '_king', '_boss',
+  '_run', '_fly', '91', '88', '77', '55', '33', '12', '44', '69', '007',
+  '_win', '_fast', '_top', '24', '10', '98', '03', '50', '21'
+];
+
+const BET_AMOUNTS = [
+  5, 10, 15, 20, 25, 30, 40, 50, 60, 75, 100, 150, 200, 250, 300, 500, 750, 1000, 1500, 2000
+];
 
 @Injectable()
 export class GameService {
@@ -51,39 +59,65 @@ export class GameService {
     }
   }
 
-  private generateRoundBots(): LiveBet[] {
-    const shuffled = [...BOT_NAMES].sort(() => 0.5 - Math.random());
-    const count = Math.floor(Math.random() * 8) + 18; // 18 to 25 bots per round
-    const selected = shuffled.slice(0, count);
+  private generateUniqueName(index: number): string {
+    const prefix = NAME_PREFIXES[Math.floor(Math.random() * NAME_PREFIXES.length)];
+    const suffix = NAME_SUFFIXES[Math.floor(Math.random() * NAME_SUFFIXES.length)];
+    return `${prefix}${suffix}`;
+  }
 
-    return selected.map((name, index) => {
-      const bet = BET_AMOUNTS[Math.floor(Math.random() * BET_AMOUNTS.length)];
-      
+  private generateRoundBots(): LiveBet[] {
+    // Generate between 120 and 260 bots per round (100 - 300 range)
+    const count = Math.floor(Math.random() * 141) + 120;
+    const bots: LiveBet[] = [];
+    const usedNames = new Set<string>();
+
+    for (let i = 0; i < count; i++) {
+      let name = this.generateUniqueName(i);
+      let attempts = 0;
+      while (usedNames.has(name) && attempts < 10) {
+        name = `${NAME_PREFIXES[Math.floor(Math.random() * NAME_PREFIXES.length)]}_${Math.floor(Math.random() * 900 + 100)}`;
+        attempts++;
+      }
+      usedNames.add(name);
+
+      // Bet amounts: 65% smaller ($5-$50), 25% medium ($60-$250), 10% high-rollers ($300-$2000)
+      const rollAmount = Math.random();
+      let bet: number;
+      if (rollAmount < 0.65) {
+        bet = [5, 10, 15, 20, 25, 30, 40, 50][Math.floor(Math.random() * 8)];
+      } else if (rollAmount < 0.90) {
+        bet = [60, 75, 100, 150, 200, 250][Math.floor(Math.random() * 6)];
+      } else {
+        bet = [300, 500, 750, 1000, 1500, 2000][Math.floor(Math.random() * 6)];
+      }
+
       // Target multiplier distribution:
       // 40% safe (1.10x - 1.95x)
       // 35% medium (2.00x - 4.50x)
       // 15% bold (4.50x - 12.00x)
       // 10% risky (12.00x - 40.00x)
-      const roll = Math.random();
+      const rollTarget = Math.random();
       let target: number;
-      if (roll < 0.40) {
+      if (rollTarget < 0.40) {
         target = 1.10 + Math.random() * 0.85;
-      } else if (roll < 0.75) {
+      } else if (rollTarget < 0.75) {
         target = 2.00 + Math.random() * 2.50;
-      } else if (roll < 0.90) {
+      } else if (rollTarget < 0.90) {
         target = 4.50 + Math.random() * 7.50;
       } else {
         target = 12.00 + Math.random() * 28.00;
       }
 
-      return {
-        id: `bot_${index}_${Date.now()}`,
+      bots.push({
+        id: `bot_${i}_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
         name,
         bet,
         targetMultiplier: parseFloat(target.toFixed(2)),
         cashedOut: false,
-      };
-    });
+      });
+    }
+
+    return bots;
   }
 
   private startCountdown() {
@@ -91,36 +125,38 @@ export class GameService {
     this.countdown = 10;
     this.currentMultiplier = 1.0;
     
-    // Generate pool of 18 - 25 bots
+    // Generate pool of 120 - 260 bots
     const allBots = this.generateRoundBots();
-    // Seed initial 2-3 early bets so list isn't empty
-    this.currentRoundBets = allBots.slice(0, 3);
-    this.pendingRoundBots = allBots.slice(3);
+    // Seed initial 15-20 early bets so list starts bustling
+    const initialCount = Math.floor(Math.random() * 8) + 14;
+    this.currentRoundBets = allBots.slice(0, initialCount);
+    this.pendingRoundBots = allBots.slice(initialCount);
 
-    this.logger.log(`Starting countdown. Initial bets: ${this.currentRoundBets.length}, Pending stream: ${this.pendingRoundBots.length}`);
+    this.logger.log(`Starting countdown. Initial bets: ${this.currentRoundBets.length}, Total targeted: ${allBots.length}`);
     this.broadcastState();
 
     if (this.timer) clearInterval(this.timer);
     if (this.botStreamTimer) clearInterval(this.botStreamTimer);
 
-    // Stream incoming bets every 400-500ms to simulate realistic crowd joining
+    // Stream incoming batches every 350ms to simulate a packed, lively casino room
     this.botStreamTimer = setInterval(() => {
       if (this.status === GameStatus.WAITING && this.pendingRoundBots.length > 0) {
-        // Occasionally emit 2 bets when countdown is closer
-        const countToEmit = (this.countdown <= 6 && Math.random() > 0.4 && this.pendingRoundBots.length >= 2) ? 2 : 1;
-        for (let i = 0; i < countToEmit; i++) {
-          const nextBot = this.pendingRoundBots.shift();
-          if (nextBot) {
-            this.currentRoundBets.push(nextBot);
-            if (this.server) {
-              this.server.emit('newLiveBet', nextBot);
-            }
+        // Stream batches of 4 - 10 bets per burst
+        const batchSize = Math.min(
+          this.pendingRoundBots.length,
+          Math.floor(Math.random() * 7) + 4
+        );
+        const batch = this.pendingRoundBots.splice(0, batchSize);
+        if (batch.length > 0) {
+          this.currentRoundBets.push(...batch);
+          if (this.server) {
+            this.server.emit('newLiveBetsBatch', batch);
           }
         }
       } else if (this.pendingRoundBots.length === 0 && this.botStreamTimer) {
         clearInterval(this.botStreamTimer);
       }
-    }, 450);
+    }, 350);
 
     this.timer = setInterval(() => {
       this.countdown--;
@@ -128,13 +164,11 @@ export class GameService {
       
       // Flush any remaining pending bots so everyone is in right before flight
       if (this.countdown <= 1) {
-        while (this.pendingRoundBots.length > 0) {
-          const nextBot = this.pendingRoundBots.shift();
-          if (nextBot) {
-            this.currentRoundBets.push(nextBot);
-            if (this.server) {
-              this.server.emit('newLiveBet', nextBot);
-            }
+        if (this.pendingRoundBots.length > 0) {
+          const remainingBatch = this.pendingRoundBots.splice(0);
+          this.currentRoundBets.push(...remainingBatch);
+          if (this.server) {
+            this.server.emit('newLiveBetsBatch', remainingBatch);
           }
         }
       }
@@ -155,9 +189,8 @@ export class GameService {
     
     if (this.botStreamTimer) clearInterval(this.botStreamTimer);
     // Ensure all pending bets are in
-    while (this.pendingRoundBots.length > 0) {
-      const nextBot = this.pendingRoundBots.shift();
-      if (nextBot) this.currentRoundBets.push(nextBot);
+    if (this.pendingRoundBots.length > 0) {
+      this.currentRoundBets.push(...this.pendingRoundBots.splice(0));
     }
 
     this.logger.log(`Game started. Total bets: ${this.currentRoundBets.length}, Crash point: ${this.crashPoint}`);
