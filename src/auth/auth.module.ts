@@ -1,10 +1,13 @@
 import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { RedisModule } from '../redis/redis.module';
+import { User } from './entities/user.entity';
+import { Transaction } from './entities/transaction.entity';
 
 @Module({
-  imports: [RedisModule],
+  imports: [TypeOrmModule.forFeature([User, Transaction]), RedisModule],
   controllers: [AuthController],
   providers: [AuthService],
   exports: [AuthService],
