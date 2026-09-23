@@ -51,9 +51,37 @@ export class AuthService {
 
   async register(identifier: string, password: string, currency?: string): Promise<{ token: string; user: UserProfile }> {
     const clean = identifier?.trim().replace(/\s+/g, '');
-    if (!clean || clean.length < 3) {
+    if (!clean || clean.length < 5) {
       throw new BadRequestException('Please enter a valid mobile number');
     }
+
+    // Validate mobile number format strictly based on country
+    if (clean.startsWith('+94')) {
+      if (!/^\+947[0-9]{8}$/.test(clean)) {
+        throw new BadRequestException('Sri Lankan mobile numbers must have 9 digits starting with 7 (e.g. 77 123 4567)');
+      }
+    } else if (clean.startsWith('+1')) {
+      if (!/^\+1[2-9]\d{9}$/.test(clean)) {
+        throw new BadRequestException('US/Canada mobile numbers must have 10 digits');
+      }
+    } else if (clean.startsWith('+91')) {
+      if (!/^\+91[6-9]\d{9}$/.test(clean)) {
+        throw new BadRequestException('Indian mobile numbers must have 10 digits starting with 6, 7, 8, or 9');
+      }
+    } else if (clean.startsWith('+44')) {
+      if (!/^\+447\d{9}$/.test(clean)) {
+        throw new BadRequestException('UK mobile numbers must have 10 digits starting with 7');
+      }
+    } else if (clean.startsWith('+971')) {
+      if (!/^\+9715\d{8}$/.test(clean)) {
+        throw new BadRequestException('UAE mobile numbers must have 9 digits starting with 5');
+      }
+    } else if (clean.startsWith('+')) {
+      if (!/^\+[1-9]\d{6,14}$/.test(clean)) {
+        throw new BadRequestException('Please enter a valid mobile number for the selected country');
+      }
+    }
+
     if (!password || password.length < 4) {
       throw new BadRequestException('Password must be at least 4 characters long');
     }
