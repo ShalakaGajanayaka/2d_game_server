@@ -1,9 +1,15 @@
-import { Controller, Post, Get, Body, Headers, UnauthorizedException } from '@nestjs/common';
+import { Controller, Post, Get, Body, Headers, Query, UnauthorizedException } from '@nestjs/common';
 import { AuthService } from './auth.service';
 
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
+
+  @Get('check-phone')
+  async checkPhone(@Query('phone') phone: string) {
+    const exists = await this.authService.checkPhoneExists(phone);
+    return { exists };
+  }
 
   @Post('register')
   async register(@Body() body: { username?: string; mobile?: string; phoneNumber?: string; password: string; currency?: string }) {

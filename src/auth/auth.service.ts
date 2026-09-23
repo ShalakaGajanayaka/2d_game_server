@@ -60,12 +60,31 @@ export class AuthService {
 
     const cleanCurrency = (currency?.trim().toUpperCase() || 'USD').slice(0, 10);
 
+    // Build all candidate variations for comprehensive duplicate verification
+    const candidates = [clean.toLowerCase(), clean];
+    if (clean.startsWith('+94')) {
+      const national = clean.slice(3); // e.g. 784748345
+      candidates.push(national);
+      candidates.push(`0${national}`); // e.g. 0784748345
+    } else if (clean.startsWith('0') && clean.length === 10) {
+      candidates.push(`+94${clean.slice(1)}`);
+      candidates.push(clean.slice(1));
+    } else if (!clean.startsWith('+') && clean.length === 9) {
+      candidates.push(`+94${clean}`);
+      candidates.push(`0${clean}`);
+    }
+
+    const whereConditions = candidates.flatMap((c) => [
+      { username: c.toLowerCase() },
+      { phoneNumber: c },
+    ]);
+
     // Check if user already exists in PostgreSQL
     const existing = await this.userRepository.findOne({
-      where: [{ username: clean.toLowerCase() }, { phoneNumber: clean }],
+      where: whereConditions,
     });
     if (existing) {
-      throw new BadRequestException('Mobile number is already registered. Please sign in.');
+      throw new BadRequestException('This mobile number is already registered. Please sign in.');
     }
 
     // Hash password with bcrypt
@@ -278,5 +297,33 @@ export class AuthService {
       balance: sanitized.balance,
       user: sanitized,
     };
+  }
+
+  async checkPhoneExists(phone: string): Promise<boolean> {
+    const clean = phone?.trim().replace(/\s+/g, '');
+    if (!clean || clean.length < 5) return false;
+
+    const candidates = [clean.toLowerCase(), clean];
+    if (clean.startsWith('+94')) {
+      const national = clean.slice(3);
+      candidates.push(national);
+      candidates.push(`0${national}`);
+    } else if (clean.startsWith('0') && clean.length === 10) {
+      candidates.push(`+94${clean.slice(1)}`);
+      candidates.push(clean.slice(1));
+    } else if (!clean.startsWith('+') && clean.length === 9) {
+      candidates.push(`+94${clean}`);
+      candidates.push(`0${clean}`);
+    }
+
+    const whereConditions = candidates.flatMap((c) => [
+      { username: c.toLowerCase() },
+      { phoneNumber: c },
+    ]);
+
+    const count = await this.userRepository.count({
+      where: whereConditions,
+    });
+    return count > 0;
   }
 }
