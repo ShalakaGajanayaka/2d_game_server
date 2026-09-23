@@ -10,6 +10,7 @@ import { Transaction } from './entities/transaction.entity';
 export interface UserProfile {
   id: string;
   username: string;
+  currency: string;
   balance: number;
   gamesPlayed: number;
   totalWon: number;
@@ -37,6 +38,7 @@ export class AuthService {
     return {
       id: user.id,
       username: user.username,
+      currency: user.currency || 'USD',
       balance: Number(user.balance),
       gamesPlayed: Number(user.gamesPlayed),
       totalWon: Number(user.totalWon),
@@ -45,7 +47,7 @@ export class AuthService {
     };
   }
 
-  async register(username: string, password: string): Promise<{ token: string; user: UserProfile }> {
+  async register(username: string, password: string, currency?: string): Promise<{ token: string; user: UserProfile }> {
     const cleanUsername = username?.trim().toLowerCase();
     if (!cleanUsername || cleanUsername.length < 3) {
       throw new BadRequestException('Username must be at least 3 characters long');
@@ -53,6 +55,8 @@ export class AuthService {
     if (!password || password.length < 4) {
       throw new BadRequestException('Password must be at least 4 characters long');
     }
+
+    const cleanCurrency = (currency?.trim().toUpperCase() || 'USD').slice(0, 10);
 
     // Check if user already exists in PostgreSQL
     const existing = await this.userRepository.findOne({ where: { username: cleanUsername } });
@@ -66,6 +70,7 @@ export class AuthService {
     const newUser = this.userRepository.create({
       username: cleanUsername,
       passwordHash,
+      currency: cleanCurrency,
       balance: 1000.0, // Welcome balance
       gamesPlayed: 0,
       totalWon: 0.0,
@@ -80,6 +85,7 @@ export class AuthService {
         userId: savedUser.id,
         type: 'DEPOSIT',
         amount: 1000.0,
+        currency: cleanCurrency,
         multiplier: null,
         balanceAfter: 1000.0,
       });
@@ -222,6 +228,7 @@ export class AuthService {
           userId: savedUser.id,
           type: txType,
           amount: diff,
+          currency: savedUser.currency || 'USD',
           multiplier: mult ?? null,
           balanceAfter: balanceNum,
         });

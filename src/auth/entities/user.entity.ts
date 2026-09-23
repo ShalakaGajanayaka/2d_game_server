@@ -23,6 +23,9 @@ export class User {
   @Column('decimal', { precision: 8, scale: 2, default: 1.0 })
   bestMultiplier: number;
 
+  @Column({ default: 'USD', length: 10 })
+  currency: string;
+
   @CreateDateColumn()
   createdAt: Date;
 

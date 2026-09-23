@@ -21,6 +21,9 @@ export class Transaction {
   @Column('decimal', { precision: 12, scale: 2 })
   balanceAfter: number;
 
+  @Column({ default: 'USD', length: 10 })
+  currency: string;
+
   @CreateDateColumn()
   createdAt: Date;
 }
