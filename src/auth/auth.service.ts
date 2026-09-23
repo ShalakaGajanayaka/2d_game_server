@@ -71,12 +71,15 @@ export class AuthService {
     // Hash password with bcrypt
     const passwordHash = await bcrypt.hash(password, 10);
 
+    // Initial welcome balance (currently 0.0 per business requirements)
+    const initialWelcomeBalance = 0.0;
+
     const newUser = this.userRepository.create({
       username: clean.toLowerCase(),
       phoneNumber: clean,
       passwordHash,
       currency: cleanCurrency,
-      balance: 1000.0, // Welcome balance
+      balance: initialWelcomeBalance,
       gamesPlayed: 0,
       totalWon: 0.0,
       bestMultiplier: 1.0,
@@ -84,18 +87,20 @@ export class AuthService {
 
     const savedUser = await this.userRepository.save(newUser);
 
-    // Record welcome bonus transaction in PostgreSQL ledger
-    try {
-      await this.transactionRepository.save({
-        userId: savedUser.id,
-        type: 'DEPOSIT',
-        amount: 1000.0,
-        currency: cleanCurrency,
-        multiplier: null,
-        balanceAfter: 1000.0,
-      });
-    } catch (err) {
-      this.logger.warn('Failed to log welcome deposit transaction', err);
+    // Record welcome bonus transaction in PostgreSQL ledger only if balance > 0
+    if (initialWelcomeBalance > 0) {
+      try {
+        await this.transactionRepository.save({
+          userId: savedUser.id,
+          type: 'DEPOSIT',
+          amount: initialWelcomeBalance,
+          currency: cleanCurrency,
+          multiplier: null,
+          balanceAfter: initialWelcomeBalance,
+        });
+      } catch (err) {
+        this.logger.warn('Failed to log welcome deposit transaction', err);
+      }
     }
 
     const token = this.generateToken();
