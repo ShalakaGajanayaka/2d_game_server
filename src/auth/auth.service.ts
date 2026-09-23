@@ -1,6 +1,6 @@
 import { Injectable, BadRequestException, UnauthorizedException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, ILike } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import { RedisService } from '../redis/redis.service';
@@ -33,6 +33,50 @@ export class AuthService {
 
   private generateToken(): string {
     return crypto.randomBytes(24).toString('hex');
+  }
+
+  private async generateUniqueUsername(): Promise<string> {
+    const prefixes = [
+      'Pilot',
+      'SkyAce',
+      'Aero',
+      'JetRider',
+      'SkyWalker',
+      'Aviator',
+      'CloudStriker',
+      'TopGun',
+      'FlightMaster',
+      'SpeedAce',
+    ];
+    let isUnique = false;
+    let candidate = '';
+    let attempts = 0;
+
+    while (!isUnique && attempts < 25) {
+      attempts++;
+      const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
+      const randomNum = Math.floor(10000 + Math.random() * 90000); // 5 digits (e.g. 78421)
+      candidate = `${prefix}_${randomNum}`;
+
+      // Check if username exists in database (exact and lowercase)
+      const exists = await this.userRepository.findOne({
+        where: [
+          { username: candidate },
+          { username: candidate.toLowerCase() },
+        ],
+      });
+
+      if (!exists) {
+        isUnique = true;
+      }
+    }
+
+    if (!isUnique) {
+      // High-concurrency fallback ensuring complete uniqueness
+      candidate = `Pilot_${Date.now().toString().slice(-6)}`;
+    }
+
+    return candidate;
   }
 
   private sanitizeUser(user: User): UserProfile {
@@ -121,8 +165,11 @@ export class AuthService {
     // Initial welcome balance (currently 0.0 per business requirements)
     const initialWelcomeBalance = 0.0;
 
+    // Auto-generate guaranteed unique username (not existing in database)
+    const uniqueUsername = await this.generateUniqueUsername();
+
     const newUser = this.userRepository.create({
-      username: clean.toLowerCase(),
+      username: uniqueUsername,
       phoneNumber: clean,
       passwordHash,
       currency: cleanCurrency,
@@ -154,7 +201,8 @@ export class AuthService {
 
     // Cache session and user in Redis for high-speed retrieval
     try {
-      await this.redisService.set(`token:${token}`, clean.toLowerCase(), 86400 * 7); // 7 days TTL
+      await this.redisService.set(`token:${token}`, savedUser.username, 86400 * 7); // 7 days TTL
+      await this.redisService.set(`user:${savedUser.username.toLowerCase()}`, JSON.stringify(this.sanitizeUser(savedUser)));
       await this.redisService.set(`user:${clean.toLowerCase()}`, JSON.stringify(this.sanitizeUser(savedUser)));
     } catch (err) {
       this.logger.warn('Failed to cache user in Redis', err);
@@ -185,11 +233,14 @@ export class AuthService {
       candidates.push(`+94${clean.slice(4)}`);
     }
 
-    // Find user in PostgreSQL by username OR phoneNumber across candidate formats
-    const whereConditions = candidates.flatMap((c) => [
-      { username: c.toLowerCase() },
-      { phoneNumber: c },
-    ]);
+    // Find user in PostgreSQL by username (case-insensitive) OR phoneNumber across candidate formats
+    const whereConditions = [
+      { username: ILike(clean) },
+      ...candidates.flatMap((c) => [
+        { username: c },
+        { phoneNumber: c },
+      ]),
+    ];
 
     const user = await this.userRepository.findOne({
       where: whereConditions,
