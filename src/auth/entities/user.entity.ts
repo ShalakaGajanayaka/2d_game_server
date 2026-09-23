@@ -11,7 +11,7 @@ export class User {
   @Column()
   passwordHash: string;
 
-  @Column('decimal', { precision: 12, scale: 2, default: 1000.0 })
+  @Column('decimal', { precision: 12, scale: 2, default: 0.0 })
   balance: number;
 
   @Column({ default: 0 })
