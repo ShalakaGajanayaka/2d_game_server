@@ -120,9 +120,27 @@ export class AuthService {
       throw new BadRequestException('Mobile number and password are required');
     }
 
-    // Find user in PostgreSQL by username OR phoneNumber
+    // Build candidate identifiers for flexible mobile number and username lookup
+    const candidates = [clean.toLowerCase(), clean];
+    if (clean.startsWith('0') && clean.length === 10) {
+      // Local 10-digit Sri Lankan format (e.g. 0771234567 -> +94771234567)
+      candidates.push(`+94${clean.slice(1)}`);
+    } else if (!clean.startsWith('+') && clean.length === 9) {
+      // 9 digits without leading 0 (e.g. 771234567 -> +94771234567)
+      candidates.push(`+94${clean}`);
+    } else if (clean.startsWith('+940')) {
+      // In case typed +94077...
+      candidates.push(`+94${clean.slice(4)}`);
+    }
+
+    // Find user in PostgreSQL by username OR phoneNumber across candidate formats
+    const whereConditions = candidates.flatMap((c) => [
+      { username: c.toLowerCase() },
+      { phoneNumber: c },
+    ]);
+
     const user = await this.userRepository.findOne({
-      where: [{ username: clean.toLowerCase() }, { phoneNumber: clean }],
+      where: whereConditions,
     });
     if (!user) {
       throw new UnauthorizedException('Invalid mobile number or password');
