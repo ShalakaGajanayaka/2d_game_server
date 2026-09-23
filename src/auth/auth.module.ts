@@ -5,9 +5,10 @@ import { AuthController } from './auth.controller';
 import { RedisModule } from '../redis/redis.module';
 import { User } from './entities/user.entity';
 import { Transaction } from './entities/transaction.entity';
+import { DepositRequest } from './entities/deposit-request.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([User, Transaction]), RedisModule],
+  imports: [TypeOrmModule.forFeature([User, Transaction, DepositRequest]), RedisModule],
   controllers: [AuthController],
   providers: [AuthService],
   exports: [AuthService],

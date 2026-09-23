@@ -265,4 +265,24 @@ export class GameService {
       bets: this.currentRoundBets,
     };
   }
+
+  public notifyUserBalance(username: string, balance: number, message?: string) {
+    if (this.server) {
+      this.server.emit('userBalanceUpdated', {
+        username,
+        balance,
+        message: message || 'Your wallet balance has been updated.',
+        timestamp: Date.now(),
+      });
+    }
+  }
+
+  public notifyNewDeposit(deposit: any) {
+    if (this.server) {
+      this.server.emit('newDepositSubmitted', {
+        deposit,
+        timestamp: Date.now(),
+      });
+    }
+  }
 }

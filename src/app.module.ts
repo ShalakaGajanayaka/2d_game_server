@@ -6,8 +6,10 @@ import { AppService } from './app.service';
 import { RedisModule } from './redis/redis.module';
 import { GameModule } from './game/game.module';
 import { AuthModule } from './auth/auth.module';
+import { AdminModule } from './admin/admin.module';
 import { User } from './auth/entities/user.entity';
 import { Transaction } from './auth/entities/transaction.entity';
+import { DepositRequest } from './auth/entities/deposit-request.entity';
 
 @Module({
   imports: [
@@ -22,13 +24,14 @@ import { Transaction } from './auth/entities/transaction.entity';
         username: config.get<string>('DB_USER', 'postgres'),
         password: config.get<string>('DB_PASSWORD', '12345678'),
         database: config.get<string>('DB_NAME', 'skyrush_db'),
-        entities: [User, Transaction],
+        entities: [User, Transaction, DepositRequest],
         synchronize: true, // Auto-create tables in PostgreSQL
       }),
     }),
     RedisModule,
     GameModule,
     AuthModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [AppService],
