@@ -6,8 +6,13 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Get('detect-currency')
-  async detectCurrency(@Req() req: any, @Query('ip') ip?: string) {
-    return this.authService.detectCurrency(req, ip);
+  async detectCurrency(
+    @Req() req: any,
+    @Query('ip') ip?: string,
+    @Query('tz') tz?: string,
+    @Query('offset') offset?: string,
+  ) {
+    return this.authService.detectCurrency(req, ip, tz, offset);
   }
 
   @Get('check-phone')

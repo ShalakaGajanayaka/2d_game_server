@@ -51,6 +51,39 @@ export const COUNTRY_TO_CURRENCY: Record<string, string> = {
   AR: 'ARS',
 };
 
+export const TIMEZONE_TO_COUNTRY: Record<string, string> = {
+  'asia/colombo': 'LK',
+  'asia/kolkata': 'IN',
+  'asia/calcutta': 'IN',
+  'asia/dubai': 'AE',
+  'asia/muscat': 'OM',
+  'asia/qatar': 'QA',
+  'asia/riyadh': 'SA',
+  'asia/singapore': 'SG',
+  'asia/kuala_lumpur': 'MY',
+  'asia/bangkok': 'TH',
+  'asia/jakarta': 'ID',
+  'asia/manila': 'PH',
+  'asia/tokyo': 'JP',
+  'asia/seoul': 'KR',
+  'asia/hong_kong': 'HK',
+  'asia/dhaka': 'BD',
+  'asia/karachi': 'PK',
+  'asia/kathmandu': 'NP',
+  'australia/sydney': 'AU',
+  'australia/melbourne': 'AU',
+  'europe/london': 'GB',
+  'europe/paris': 'FR',
+  'europe/berlin': 'DE',
+  'europe/rome': 'IT',
+  'europe/madrid': 'ES',
+  'america/new_york': 'US',
+  'america/los_angeles': 'US',
+  'america/chicago': 'US',
+  'america/toronto': 'CA',
+  'america/vancouver': 'CA',
+};
+
 export interface UserProfile {
   id: string;
   username: string;
@@ -518,11 +551,18 @@ export class AuthService {
     };
   }
 
-  detectCurrency(req: any, queryIp?: string): { ip: string; country: string; currency: string; isLocal: boolean } {
+  detectCurrency(
+    req: any,
+    queryIp?: string,
+    queryTz?: string,
+    queryOffset?: string,
+  ): { ip: string; country: string; currency: string; isLocal: boolean; source: string } {
     let clientIp = (queryIp || '').trim();
 
     if (!clientIp && req) {
-      const forwarded = req.headers ? (req.headers['x-forwarded-for'] || req.headers['cf-connecting-ip'] || req.headers['x-real-ip']) : null;
+      const forwarded = req.headers
+        ? (req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.headers['x-real-ip'])
+        : null;
       if (typeof forwarded === 'string') {
         clientIp = forwarded.split(',')[0].trim();
       } else if (Array.isArray(forwarded) && forwarded.length > 0) {
@@ -547,23 +587,49 @@ export class AuthService {
       clientIp.startsWith('10.') ||
       clientIp.startsWith('172.16.');
 
-    if (isLocal) {
-      const acceptLang = req?.headers ? (req.headers['accept-language'] || '') : '';
-      let country = 'LK'; // Default for local development is Sri Lanka
-      if (typeof acceptLang === 'string' && acceptLang.includes('-')) {
-        const parts = acceptLang.split(',')[0].split('-');
-        if (parts.length > 1 && parts[1].length === 2) {
-          country = parts[1].toUpperCase();
-        }
+    // 1. If real public IP exists, prioritize GeoIP lookup
+    if (!isLocal) {
+      const geo = geoip.lookup(clientIp);
+      if (geo?.country) {
+        const country = geo.country.toUpperCase();
+        const currency = COUNTRY_TO_CURRENCY[country] || 'USD';
+        return { ip: clientIp, country, currency, isLocal: false, source: 'geoip' };
       }
-      const currency = COUNTRY_TO_CURRENCY[country] || 'LKR';
-      return { ip: clientIp || '127.0.0.1', country, currency, isLocal: true };
     }
 
-    const geo = geoip.lookup(clientIp);
-    const country = geo?.country ? geo.country.toUpperCase() : 'US';
-    const currency = COUNTRY_TO_CURRENCY[country] || 'USD';
+    // 2. If local or GeoIP not found, evaluate client Timezone name
+    const cleanTz = (queryTz || '').trim().toLowerCase();
+    if (cleanTz) {
+      if (cleanTz.includes('colombo') || cleanTz.includes('sri lanka') || cleanTz.includes('srilanka')) {
+        return { ip: clientIp || '127.0.0.1', country: 'LK', currency: 'LKR', isLocal, source: 'timezone' };
+      }
+      for (const [tzKey, ctry] of Object.entries(TIMEZONE_TO_COUNTRY)) {
+        if (cleanTz.includes(tzKey)) {
+          const currency = COUNTRY_TO_CURRENCY[ctry] || 'USD';
+          return { ip: clientIp || '127.0.0.1', country: ctry, currency, isLocal, source: 'timezone' };
+        }
+      }
+    }
 
-    return { ip: clientIp, country, currency, isLocal: false };
+    // 3. Evaluate client Timezone UTC offset (e.g. +330 mins = +05:30)
+    const offsetMin = queryOffset ? parseInt(queryOffset, 10) : null;
+    if (offsetMin === 330) {
+      return { ip: clientIp || '127.0.0.1', country: 'LK', currency: 'LKR', isLocal, source: 'timezone-offset' };
+    } else if (offsetMin === 345) {
+      return { ip: clientIp || '127.0.0.1', country: 'NP', currency: 'NPR', isLocal, source: 'timezone-offset' };
+    } else if (offsetMin === 360) {
+      return { ip: clientIp || '127.0.0.1', country: 'BD', currency: 'BDT', isLocal, source: 'timezone-offset' };
+    } else if (offsetMin === 300) {
+      return { ip: clientIp || '127.0.0.1', country: 'PK', currency: 'PKR', isLocal, source: 'timezone-offset' };
+    } else if (offsetMin === 240) {
+      return { ip: clientIp || '127.0.0.1', country: 'AE', currency: 'AED', isLocal, source: 'timezone-offset' };
+    } else if (offsetMin === 480) {
+      return { ip: clientIp || '127.0.0.1', country: 'SG', currency: 'SGD', isLocal, source: 'timezone-offset' };
+    } else if (offsetMin === 0) {
+      return { ip: clientIp || '127.0.0.1', country: 'GB', currency: 'GBP', isLocal, source: 'timezone-offset' };
+    }
+
+    // 4. Default fallback: Sri Lanka (LKR)
+    return { ip: clientIp || '127.0.0.1', country: 'LK', currency: 'LKR', isLocal, source: 'default' };
   }
 }

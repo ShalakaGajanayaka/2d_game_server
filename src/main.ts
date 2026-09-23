@@ -5,6 +5,12 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
+  // Trust reverse proxy (Cloudflare, Nginx, Render) for client IP detection
+  const expressApp = app.getHttpAdapter().getInstance();
+  if (expressApp && typeof expressApp.set === 'function') {
+    expressApp.set('trust proxy', 1);
+  }
+
   // Enable CORS for Flutter Web / any origin
   app.enableCors({
     origin: true,
