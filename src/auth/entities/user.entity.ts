@@ -26,6 +26,9 @@ export class User {
   @Column({ default: 'USD', length: 10 })
   currency: string;
 
+  @Column({ nullable: true })
+  phoneNumber: string;
+
   @CreateDateColumn()
   createdAt: Date;
 

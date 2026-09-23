@@ -10,6 +10,7 @@ import { Transaction } from './entities/transaction.entity';
 export interface UserProfile {
   id: string;
   username: string;
+  phoneNumber?: string;
   currency: string;
   balance: number;
   gamesPlayed: number;
@@ -38,6 +39,7 @@ export class AuthService {
     return {
       id: user.id,
       username: user.username,
+      phoneNumber: user.phoneNumber || user.username,
       currency: user.currency || 'USD',
       balance: Number(user.balance),
       gamesPlayed: Number(user.gamesPlayed),
@@ -47,10 +49,10 @@ export class AuthService {
     };
   }
 
-  async register(username: string, password: string, currency?: string): Promise<{ token: string; user: UserProfile }> {
-    const cleanUsername = username?.trim().toLowerCase();
-    if (!cleanUsername || cleanUsername.length < 3) {
-      throw new BadRequestException('Username must be at least 3 characters long');
+  async register(identifier: string, password: string, currency?: string): Promise<{ token: string; user: UserProfile }> {
+    const clean = identifier?.trim().replace(/\s+/g, '');
+    if (!clean || clean.length < 3) {
+      throw new BadRequestException('Please enter a valid mobile number');
     }
     if (!password || password.length < 4) {
       throw new BadRequestException('Password must be at least 4 characters long');
@@ -59,16 +61,19 @@ export class AuthService {
     const cleanCurrency = (currency?.trim().toUpperCase() || 'USD').slice(0, 10);
 
     // Check if user already exists in PostgreSQL
-    const existing = await this.userRepository.findOne({ where: { username: cleanUsername } });
+    const existing = await this.userRepository.findOne({
+      where: [{ username: clean.toLowerCase() }, { phoneNumber: clean }],
+    });
     if (existing) {
-      throw new BadRequestException('Username already taken. Please choose another.');
+      throw new BadRequestException('Mobile number is already registered. Please sign in.');
     }
 
     // Hash password with bcrypt
     const passwordHash = await bcrypt.hash(password, 10);
 
     const newUser = this.userRepository.create({
-      username: cleanUsername,
+      username: clean.toLowerCase(),
+      phoneNumber: clean,
       passwordHash,
       currency: cleanCurrency,
       balance: 1000.0, // Welcome balance
@@ -97,8 +102,8 @@ export class AuthService {
 
     // Cache session and user in Redis for high-speed retrieval
     try {
-      await this.redisService.set(`token:${token}`, cleanUsername, 86400 * 7); // 7 days TTL
-      await this.redisService.set(`user:${cleanUsername}`, JSON.stringify(this.sanitizeUser(savedUser)));
+      await this.redisService.set(`token:${token}`, clean.toLowerCase(), 86400 * 7); // 7 days TTL
+      await this.redisService.set(`user:${clean.toLowerCase()}`, JSON.stringify(this.sanitizeUser(savedUser)));
     } catch (err) {
       this.logger.warn('Failed to cache user in Redis', err);
     }
@@ -109,16 +114,18 @@ export class AuthService {
     };
   }
 
-  async login(username: string, password: string): Promise<{ token: string; user: UserProfile }> {
-    const cleanUsername = username?.trim().toLowerCase();
-    if (!cleanUsername || !password) {
-      throw new BadRequestException('Username and password are required');
+  async login(identifier: string, password: string): Promise<{ token: string; user: UserProfile }> {
+    const clean = identifier?.trim().replace(/\s+/g, '');
+    if (!clean || !password) {
+      throw new BadRequestException('Mobile number and password are required');
     }
 
-    // Find user in PostgreSQL
-    const user = await this.userRepository.findOne({ where: { username: cleanUsername } });
+    // Find user in PostgreSQL by username OR phoneNumber
+    const user = await this.userRepository.findOne({
+      where: [{ username: clean.toLowerCase() }, { phoneNumber: clean }],
+    });
     if (!user) {
-      throw new UnauthorizedException('Invalid username or password');
+      throw new UnauthorizedException('Invalid mobile number or password');
     }
 
     // Verify password with bcrypt (with sha256 fallback if previously hashed)
@@ -147,8 +154,8 @@ export class AuthService {
 
     // Cache session in Redis
     try {
-      await this.redisService.set(`token:${token}`, cleanUsername, 86400 * 7);
-      await this.redisService.set(`user:${cleanUsername}`, JSON.stringify(this.sanitizeUser(user)));
+      await this.redisService.set(`token:${token}`, user.username, 86400 * 7);
+      await this.redisService.set(`user:${user.username}`, JSON.stringify(this.sanitizeUser(user)));
     } catch {}
 
     return {

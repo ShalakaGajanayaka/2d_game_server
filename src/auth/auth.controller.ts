@@ -6,13 +6,15 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('register')
-  async register(@Body() body: { username: string; password: string; currency?: string }) {
-    return this.authService.register(body.username, body.password, body.currency);
+  async register(@Body() body: { username?: string; mobile?: string; phoneNumber?: string; password: string; currency?: string }) {
+    const identifier = body.phoneNumber || body.mobile || body.username || '';
+    return this.authService.register(identifier, body.password, body.currency);
   }
 
   @Post('login')
-  async login(@Body() body: { username: string; password: string }) {
-    return this.authService.login(body.username, body.password);
+  async login(@Body() body: { username?: string; mobile?: string; phoneNumber?: string; password: string }) {
+    const identifier = body.phoneNumber || body.mobile || body.username || '';
+    return this.authService.login(identifier, body.password);
   }
 
   @Get('profile')
