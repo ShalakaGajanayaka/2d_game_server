@@ -23,6 +23,20 @@ export class AuthController {
     return this.authService.login(identifier, body.password);
   }
 
+  @Post('forgot-password/request-otp')
+  async requestResetOtp(@Body() body: { phoneNumber?: string; mobile?: string; phone?: string }) {
+    const phone = body.phoneNumber || body.mobile || body.phone || '';
+    return this.authService.requestPasswordResetOtp(phone);
+  }
+
+  @Post('forgot-password/reset')
+  async resetPassword(
+    @Body() body: { phoneNumber?: string; mobile?: string; phone?: string; otp: string; newPassword: string },
+  ) {
+    const phone = body.phoneNumber || body.mobile || body.phone || '';
+    return this.authService.resetPassword(phone, body.otp, body.newPassword);
+  }
+
   @Get('profile')
   async getProfile(@Headers('authorization') authHeader: string) {
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
