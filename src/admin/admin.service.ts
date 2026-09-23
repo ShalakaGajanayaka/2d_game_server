@@ -4,6 +4,7 @@ import { Repository, ILike } from 'typeorm';
 import { User } from '../auth/entities/user.entity';
 import { Transaction } from '../auth/entities/transaction.entity';
 import { DepositRequest, DepositStatus } from '../auth/entities/deposit-request.entity';
+import { WithdrawalRequest, WithdrawalStatus } from '../auth/entities/withdrawal-request.entity';
 import { RedisService } from '../redis/redis.service';
 import { GameService } from '../game/game.service';
 
@@ -29,6 +30,8 @@ export class AdminService {
     private readonly transactionRepo: Repository<Transaction>,
     @InjectRepository(DepositRequest)
     private readonly depositRepo: Repository<DepositRequest>,
+    @InjectRepository(WithdrawalRequest)
+    private readonly withdrawalRepo: Repository<WithdrawalRequest>,
     private readonly redisService: RedisService,
     private readonly gameService: GameService,
   ) {}
@@ -123,6 +126,12 @@ export class AdminService {
     const approvedList = await this.depositRepo.find({ where: { status: DepositStatus.APPROVED } });
     const totalDepositedAmount = approvedList.reduce((sum, d) => sum + Number(d.amount), 0);
 
+    const pendingWithdrawals = await this.withdrawalRepo.count({ where: { status: WithdrawalStatus.PENDING } });
+    const paidWithdrawals = await this.withdrawalRepo.count({ where: { status: WithdrawalStatus.PAID } });
+
+    const paidWithdrawalList = await this.withdrawalRepo.find({ where: { status: WithdrawalStatus.PAID } });
+    const totalWithdrawnAmount = paidWithdrawalList.reduce((sum, w) => sum + Number(w.amount), 0);
+
     const allUsers = await this.userRepo.find();
     const totalSystemBalance = allUsers.reduce((sum, u) => sum + Number(u.balance), 0);
 
@@ -131,6 +140,9 @@ export class AdminService {
       pendingDeposits,
       approvedDeposits,
       totalDepositedAmount,
+      pendingWithdrawals,
+      paidWithdrawals,
+      totalWithdrawnAmount,
       totalSystemBalance,
     };
   }
@@ -365,5 +377,269 @@ export class AdminService {
         createdAt: true,
       },
     });
+  }
+
+  // -------------------------------------------------------------
+  // CLIENT WITHDRAWAL FLOW
+  // -------------------------------------------------------------
+
+  async clientSubmitWithdrawal(
+    userId: string,
+    username: string,
+    email: string | undefined,
+    amount: number,
+    currency: string,
+    method: string,
+    payoutDetails: any,
+  ): Promise<WithdrawalRequest> {
+    const cleanAmount = Number(amount);
+    if (!cleanAmount || cleanAmount < 100) {
+      throw new BadRequestException('Minimum withdrawal amount is 100');
+    }
+
+    if (!payoutDetails) {
+      throw new BadRequestException('Payout details are required');
+    }
+
+    const user = await this.userRepo.findOne({ where: [{ id: userId }, { username }] });
+    if (!user) {
+      throw new NotFoundException('User account not found');
+    }
+
+    const currentBalance = Number(user.balance);
+    if (currentBalance < cleanAmount) {
+      throw new BadRequestException(`Insufficient wallet balance. Available: ${user.currency} ${currentBalance.toFixed(2)}`);
+    }
+
+    // Atomically hold/deduct the requested amount from active wallet balance
+    const newBalance = parseFloat((currentBalance - cleanAmount).toFixed(2));
+    user.balance = newBalance;
+    const savedUser = await this.userRepo.save(user);
+
+    // Update Redis
+    try {
+      const sanitized = {
+        id: savedUser.id,
+        username: savedUser.username,
+        email: savedUser.email,
+        phoneNumber: savedUser.phoneNumber,
+        currency: savedUser.currency,
+        balance: Number(savedUser.balance),
+        gamesPlayed: Number(savedUser.gamesPlayed),
+        totalWon: Number(savedUser.totalWon),
+        bestMultiplier: Number(savedUser.bestMultiplier),
+        createdAt: savedUser.createdAt ? new Date(savedUser.createdAt).getTime() : Date.now(),
+      };
+      await this.redisService.set(`user:${savedUser.username.toLowerCase()}`, JSON.stringify(sanitized));
+      if (savedUser.email) {
+        await this.redisService.set(`user:${savedUser.email.toLowerCase()}`, JSON.stringify(sanitized));
+      }
+    } catch {}
+
+    // Record transaction ledger (escrow hold)
+    try {
+      await this.transactionRepo.save({
+        userId: savedUser.id,
+        type: 'WITHDRAWAL_ESCROW',
+        amount: -cleanAmount,
+        multiplier: null,
+        balanceAfter: newBalance,
+        currency: currency || user.currency || 'LKR',
+      });
+    } catch (err) {
+      this.logger.error('Failed to save withdrawal escrow transaction', err);
+    }
+
+    // Create WithdrawalRequest record
+    const detailsString = typeof payoutDetails === 'string' ? payoutDetails : JSON.stringify(payoutDetails);
+    const newWithdrawal = this.withdrawalRepo.create({
+      userId: savedUser.id,
+      username: savedUser.username,
+      email: email || savedUser.email || undefined,
+      amount: cleanAmount,
+      currency: (currency || user.currency || 'LKR').toUpperCase(),
+      method: method || 'bank_transfer',
+      payoutDetails: detailsString,
+      status: WithdrawalStatus.PENDING,
+    });
+
+    const savedWithdrawal = await this.withdrawalRepo.save(newWithdrawal);
+    this.logger.log(`New withdrawal request: ${savedUser.username} - ${savedWithdrawal.currency} ${cleanAmount} (${method})`);
+
+    // Notify player's active game screen of updated balance
+    this.gameService.notifyUserBalance(
+      savedUser.username,
+      newBalance,
+      `Withdrawal request for ${savedWithdrawal.currency} ${cleanAmount.toFixed(2)} submitted. Your wallet is held in escrow. ⏳`,
+    );
+
+    // Broadcast real-time notification to Next.js Admin Dashboard
+    this.gameService.notifyNewWithdrawal(savedWithdrawal);
+
+    return savedWithdrawal;
+  }
+
+  async getWithdrawals(status?: string, limit: number = 50): Promise<WithdrawalRequest[]> {
+    const where: any = {};
+    if (status && status !== 'ALL') {
+      where.status = status;
+    }
+
+    return this.withdrawalRepo.find({
+      where,
+      order: { createdAt: 'DESC' },
+      take: limit,
+    });
+  }
+
+  async approveWithdrawal(
+    withdrawalId: string,
+    adminNote?: string,
+    adminUser: string = 'Admin',
+  ): Promise<{ success: boolean; message: string; withdrawal: WithdrawalRequest }> {
+    const withdrawal = await this.withdrawalRepo.findOne({ where: { id: withdrawalId } });
+    if (!withdrawal) {
+      throw new NotFoundException('Withdrawal request not found');
+    }
+
+    if (withdrawal.status !== WithdrawalStatus.PENDING) {
+      throw new BadRequestException(`Withdrawal is already ${withdrawal.status}`);
+    }
+
+    withdrawal.status = WithdrawalStatus.PAID;
+    withdrawal.adminNote = adminNote || 'Paid to client account';
+    withdrawal.processedBy = adminUser;
+    withdrawal.processedAt = new Date();
+
+    const savedWithdrawal = await this.withdrawalRepo.save(withdrawal);
+
+    // Record ledger finalized entry
+    try {
+      await this.transactionRepo.save({
+        userId: withdrawal.userId,
+        type: 'WITHDRAWAL_PAID',
+        amount: -Number(withdrawal.amount),
+        multiplier: null,
+        balanceAfter: 0,
+        currency: withdrawal.currency,
+      });
+    } catch {}
+
+    // Real-time notification to player: Money has been sent!
+    const user = await this.userRepo.findOne({ where: { id: withdrawal.userId } });
+    if (user) {
+      this.gameService.notifyUserBalance(
+        user.username,
+        Number(user.balance),
+        `Your withdrawal of ${withdrawal.currency} ${Number(withdrawal.amount).toFixed(2)} has been transferred to your account! 💸`,
+      );
+    }
+
+    this.logger.log(`Withdrawal PAID: ${savedWithdrawal.id} for ${withdrawal.username} (${withdrawal.currency} ${withdrawal.amount})`);
+
+    return {
+      success: true,
+      message: `Withdrawal of ${withdrawal.currency} ${Number(withdrawal.amount).toFixed(2)} marked as PAID for ${withdrawal.username}!`,
+      withdrawal: savedWithdrawal,
+    };
+  }
+
+  async rejectWithdrawal(
+    withdrawalId: string,
+    reason?: string,
+    adminUser: string = 'Admin',
+  ): Promise<{ success: boolean; message: string; withdrawal: WithdrawalRequest }> {
+    const withdrawal = await this.withdrawalRepo.findOne({ where: { id: withdrawalId } });
+    if (!withdrawal) {
+      throw new NotFoundException('Withdrawal request not found');
+    }
+
+    if (withdrawal.status !== WithdrawalStatus.PENDING) {
+      throw new BadRequestException(`Withdrawal is already ${withdrawal.status}`);
+    }
+
+    const user = await this.userRepo.findOne({ where: [{ id: withdrawal.userId }, { username: withdrawal.username }] });
+    if (!user) {
+      throw new NotFoundException('User for this withdrawal was not found');
+    }
+
+    // REFUND amount back to active wallet balance!
+    const refundAmount = Number(withdrawal.amount);
+    const prevBalance = Number(user.balance);
+    const newBalance = parseFloat((prevBalance + refundAmount).toFixed(2));
+    user.balance = newBalance;
+    const savedUser = await this.userRepo.save(user);
+
+    // Update Redis
+    try {
+      const sanitized = {
+        id: savedUser.id,
+        username: savedUser.username,
+        email: savedUser.email,
+        phoneNumber: savedUser.phoneNumber,
+        currency: savedUser.currency,
+        balance: Number(savedUser.balance),
+        gamesPlayed: Number(savedUser.gamesPlayed),
+        totalWon: Number(savedUser.totalWon),
+        bestMultiplier: Number(savedUser.bestMultiplier),
+        createdAt: savedUser.createdAt ? new Date(savedUser.createdAt).getTime() : Date.now(),
+      };
+      await this.redisService.set(`user:${savedUser.username.toLowerCase()}`, JSON.stringify(sanitized));
+      if (savedUser.email) {
+        await this.redisService.set(`user:${savedUser.email.toLowerCase()}`, JSON.stringify(sanitized));
+      }
+    } catch {}
+
+    // Record ledger refund
+    try {
+      await this.transactionRepo.save({
+        userId: savedUser.id,
+        type: 'WITHDRAWAL_REFUND',
+        amount: refundAmount,
+        multiplier: null,
+        balanceAfter: newBalance,
+        currency: withdrawal.currency,
+      });
+    } catch {}
+
+    withdrawal.status = WithdrawalStatus.REJECTED;
+    withdrawal.adminNote = reason || 'Payment details could not be verified. Funds refunded.';
+    withdrawal.processedBy = adminUser;
+    withdrawal.processedAt = new Date();
+    const savedWithdrawal = await this.withdrawalRepo.save(withdrawal);
+
+    // Notify player that funds were refunded
+    this.gameService.notifyUserBalance(
+      savedUser.username,
+      newBalance,
+      `Withdrawal of ${withdrawal.currency} ${refundAmount.toFixed(2)} rejected (${withdrawal.adminNote}). Funds refunded to your wallet! 🔄`,
+    );
+
+    this.logger.log(`Withdrawal REJECTED & REFUNDED: ${savedWithdrawal.id} for ${savedUser.username}`);
+
+    return {
+      success: true,
+      message: `Withdrawal rejected and ${withdrawal.currency} ${refundAmount.toFixed(2)} refunded to ${savedUser.username}`,
+      withdrawal: savedWithdrawal,
+    };
+  }
+
+  async getClientHistory(userId: string, username: string) {
+    const deposits = await this.depositRepo.find({
+      where: [{ userId }, { username }],
+      order: { createdAt: 'DESC' },
+      take: 50,
+    });
+
+    const withdrawals = await this.withdrawalRepo.find({
+      where: [{ userId }, { username }],
+      order: { createdAt: 'DESC' },
+      take: 50,
+    });
+
+    return {
+      deposits,
+      withdrawals,
+    };
   }
 }

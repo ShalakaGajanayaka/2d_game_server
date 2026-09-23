@@ -82,6 +82,79 @@ export class AdminController {
     };
   }
 
+  @Post('withdrawal-request')
+  async submitClientWithdrawal(
+    @Body()
+    body: {
+      token: string;
+      amount: number;
+      currency?: string;
+      method: string;
+      payoutDetails: any;
+    },
+  ) {
+    if (!body.token) {
+      throw new UnauthorizedException('Please log in to submit a withdrawal request');
+    }
+
+    let username: string | null = null;
+    try {
+      username = await this.redisService.get(`token:${body.token}`);
+    } catch {}
+
+    if (!username) {
+      throw new UnauthorizedException('Session expired. Please log in again.');
+    }
+
+    const user = await this.userRepo.findOne({ where: { username } });
+    if (!user) {
+      throw new UnauthorizedException('User account not found');
+    }
+
+    const withdrawal = await this.adminService.clientSubmitWithdrawal(
+      user.id,
+      user.username,
+      user.email,
+      body.amount,
+      body.currency || user.currency || 'LKR',
+      body.method,
+      body.payoutDetails,
+    );
+
+    return {
+      success: true,
+      message: 'Withdrawal request submitted! Funds have been placed in escrow pending transfer.',
+      withdrawal,
+    };
+  }
+
+  @Get('my-history')
+  async getMyHistory(@Query('token') token?: string) {
+    if (!token) {
+      throw new UnauthorizedException('Session token required');
+    }
+
+    let username: string | null = null;
+    try {
+      username = await this.redisService.get(`token:${token}`);
+    } catch {}
+
+    if (!username) {
+      throw new UnauthorizedException('Session expired. Please log in again.');
+    }
+
+    const user = await this.userRepo.findOne({ where: { username } });
+    if (!user) {
+      throw new UnauthorizedException('User account not found');
+    }
+
+    const history = await this.adminService.getClientHistory(user.id, user.username);
+    return {
+      success: true,
+      ...history,
+    };
+  }
+
   // -------------------------------------------------------------
   // ADMIN REST APIS
   // -------------------------------------------------------------
@@ -98,6 +171,31 @@ export class AdminController {
   ) {
     const numLimit = limit ? parseInt(limit, 10) : 100;
     return this.adminService.getDeposits(status, numLimit);
+  }
+
+  @Get('api/withdrawals')
+  async getWithdrawals(
+    @Query('status') status?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const numLimit = limit ? parseInt(limit, 10) : 100;
+    return this.adminService.getWithdrawals(status, numLimit);
+  }
+
+  @Post('api/withdrawals/:id/approve')
+  async approveWithdrawal(
+    @Param('id') id: string,
+    @Body() body: { adminNote?: string; adminUser?: string },
+  ) {
+    return this.adminService.approveWithdrawal(id, body?.adminNote, body?.adminUser || 'Admin');
+  }
+
+  @Post('api/withdrawals/:id/reject')
+  async rejectWithdrawal(
+    @Param('id') id: string,
+    @Body() body: { reason?: string; adminUser?: string },
+  ) {
+    return this.adminService.rejectWithdrawal(id, body?.reason, body?.adminUser || 'Admin');
   }
 
   @Post('api/deposits/:id/approve')

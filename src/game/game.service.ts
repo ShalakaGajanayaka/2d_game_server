@@ -285,4 +285,13 @@ export class GameService {
       });
     }
   }
+
+  public notifyNewWithdrawal(withdrawal: any) {
+    if (this.server) {
+      this.server.emit('newWithdrawalSubmitted', {
+        withdrawal,
+        timestamp: Date.now(),
+      });
+    }
+  }
 }
