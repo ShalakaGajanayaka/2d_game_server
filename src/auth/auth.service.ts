@@ -3,9 +3,53 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
+import * as geoip from 'geoip-lite';
 import { RedisService } from '../redis/redis.service';
 import { User } from './entities/user.entity';
 import { Transaction } from './entities/transaction.entity';
+
+export const COUNTRY_TO_CURRENCY: Record<string, string> = {
+  LK: 'LKR',
+  US: 'USD',
+  GB: 'GBP',
+  IN: 'INR',
+  AE: 'AED',
+  AU: 'AUD',
+  CA: 'CAD',
+  SG: 'SGD',
+  MY: 'MYR',
+  QA: 'QAR',
+  SA: 'SAR',
+  JP: 'JPY',
+  CN: 'CNY',
+  NZ: 'NZD',
+  CH: 'CHF',
+  DE: 'EUR', FR: 'EUR', IT: 'EUR', ES: 'EUR', NL: 'EUR', BE: 'EUR', AT: 'EUR', GR: 'EUR', IE: 'EUR', PT: 'EUR', FI: 'EUR',
+  RU: 'RUB',
+  BR: 'BRL',
+  ZA: 'ZAR',
+  KR: 'KRW',
+  TH: 'THB',
+  ID: 'IDR',
+  PH: 'PHP',
+  VN: 'VND',
+  PK: 'PKR',
+  BD: 'BDT',
+  NP: 'NPR',
+  KW: 'KWD',
+  OM: 'OMR',
+  BH: 'BHD',
+  TR: 'TRY',
+  EG: 'EGP',
+  NG: 'NGN',
+  KE: 'KES',
+  GH: 'GHS',
+  MX: 'MXN',
+  CL: 'CLP',
+  CO: 'COP',
+  PE: 'PEN',
+  AR: 'ARS',
+};
 
 export interface UserProfile {
   id: string;
@@ -472,5 +516,54 @@ export class AuthService {
       token,
       user: this.sanitizeUser(savedUser),
     };
+  }
+
+  detectCurrency(req: any, queryIp?: string): { ip: string; country: string; currency: string; isLocal: boolean } {
+    let clientIp = (queryIp || '').trim();
+
+    if (!clientIp && req) {
+      const forwarded = req.headers ? (req.headers['x-forwarded-for'] || req.headers['cf-connecting-ip'] || req.headers['x-real-ip']) : null;
+      if (typeof forwarded === 'string') {
+        clientIp = forwarded.split(',')[0].trim();
+      } else if (Array.isArray(forwarded) && forwarded.length > 0) {
+        clientIp = forwarded[0].trim();
+      }
+    }
+
+    if (!clientIp && req) {
+      clientIp = req.socket?.remoteAddress || req.ip || '';
+    }
+
+    if (clientIp.startsWith('::ffff:')) {
+      clientIp = clientIp.replace('::ffff:', '');
+    }
+
+    const isLocal =
+      !clientIp ||
+      clientIp === '127.0.0.1' ||
+      clientIp === '::1' ||
+      clientIp === 'localhost' ||
+      clientIp.startsWith('192.168.') ||
+      clientIp.startsWith('10.') ||
+      clientIp.startsWith('172.16.');
+
+    if (isLocal) {
+      const acceptLang = req?.headers ? (req.headers['accept-language'] || '') : '';
+      let country = 'LK'; // Default for local development is Sri Lanka
+      if (typeof acceptLang === 'string' && acceptLang.includes('-')) {
+        const parts = acceptLang.split(',')[0].split('-');
+        if (parts.length > 1 && parts[1].length === 2) {
+          country = parts[1].toUpperCase();
+        }
+      }
+      const currency = COUNTRY_TO_CURRENCY[country] || 'LKR';
+      return { ip: clientIp || '127.0.0.1', country, currency, isLocal: true };
+    }
+
+    const geo = geoip.lookup(clientIp);
+    const country = geo?.country ? geo.country.toUpperCase() : 'US';
+    const currency = COUNTRY_TO_CURRENCY[country] || 'USD';
+
+    return { ip: clientIp, country, currency, isLocal: false };
   }
 }

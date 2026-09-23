@@ -1,9 +1,14 @@
-import { Controller, Post, Get, Body, Headers, Query, UnauthorizedException } from '@nestjs/common';
+import { Controller, Post, Get, Body, Headers, Query, Req, UnauthorizedException } from '@nestjs/common';
 import { AuthService } from './auth.service';
 
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
+
+  @Get('detect-currency')
+  async detectCurrency(@Req() req: any, @Query('ip') ip?: string) {
+    return this.authService.detectCurrency(req, ip);
+  }
 
   @Get('check-phone')
   async checkPhone(@Query('phone') phone: string) {
