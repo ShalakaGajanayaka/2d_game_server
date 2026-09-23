@@ -12,29 +12,29 @@ export class AuthController {
   }
 
   @Post('register')
-  async register(@Body() body: { username?: string; mobile?: string; phoneNumber?: string; password: string; currency?: string }) {
-    const identifier = body.phoneNumber || body.mobile || body.username || '';
+  async register(@Body() body: { email?: string; username?: string; mobile?: string; phoneNumber?: string; password: string; currency?: string }) {
+    const identifier = body.email || body.phoneNumber || body.mobile || body.username || '';
     return this.authService.register(identifier, body.password, body.currency);
   }
 
   @Post('login')
-  async login(@Body() body: { username?: string; mobile?: string; phoneNumber?: string; password: string }) {
-    const identifier = body.phoneNumber || body.mobile || body.username || '';
+  async login(@Body() body: { email?: string; username?: string; mobile?: string; phoneNumber?: string; password: string }) {
+    const identifier = body.email || body.phoneNumber || body.mobile || body.username || '';
     return this.authService.login(identifier, body.password);
   }
 
   @Post('forgot-password/request-otp')
-  async requestResetOtp(@Body() body: { phoneNumber?: string; mobile?: string; phone?: string }) {
-    const phone = body.phoneNumber || body.mobile || body.phone || '';
-    return this.authService.requestPasswordResetOtp(phone);
+  async requestResetOtp(@Body() body: { email?: string; phoneNumber?: string; mobile?: string; phone?: string }) {
+    const identifier = body.email || body.phoneNumber || body.mobile || body.phone || '';
+    return this.authService.requestPasswordResetOtp(identifier);
   }
 
   @Post('forgot-password/reset')
   async resetPassword(
-    @Body() body: { phoneNumber?: string; mobile?: string; phone?: string; otp: string; newPassword: string },
+    @Body() body: { email?: string; phoneNumber?: string; mobile?: string; phone?: string; otp: string; newPassword: string },
   ) {
-    const phone = body.phoneNumber || body.mobile || body.phone || '';
-    return this.authService.resetPassword(phone, body.otp, body.newPassword);
+    const identifier = body.email || body.phoneNumber || body.mobile || body.phone || '';
+    return this.authService.resetPassword(identifier, body.otp, body.newPassword);
   }
 
   @Get('profile')

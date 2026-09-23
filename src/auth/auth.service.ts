@@ -10,6 +10,7 @@ import { Transaction } from './entities/transaction.entity';
 export interface UserProfile {
   id: string;
   username: string;
+  email?: string;
   phoneNumber?: string;
   currency: string;
   balance: number;
@@ -83,7 +84,8 @@ export class AuthService {
     return {
       id: user.id,
       username: user.username,
-      phoneNumber: user.phoneNumber || user.username,
+      email: user.email || undefined,
+      phoneNumber: user.phoneNumber || undefined,
       currency: user.currency || 'USD',
       balance: Number(user.balance),
       gamesPlayed: Number(user.gamesPlayed),
@@ -95,34 +97,42 @@ export class AuthService {
 
   async register(identifier: string, password: string, currency?: string): Promise<{ token: string; user: UserProfile }> {
     const clean = identifier?.trim().replace(/\s+/g, '');
-    if (!clean || clean.length < 5) {
-      throw new BadRequestException('Please enter a valid mobile number');
+    if (!clean || clean.length < 3) {
+      throw new BadRequestException('Please enter a valid email or mobile number');
     }
 
-    // Validate mobile number format strictly based on country
-    if (clean.startsWith('+94')) {
-      if (!/^\+947[0-9]{8}$/.test(clean)) {
-        throw new BadRequestException('Sri Lankan mobile numbers must have 9 digits starting with 7 (e.g. 77 123 4567)');
+    const isEmail = clean.includes('@');
+    if (isEmail) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(clean)) {
+        throw new BadRequestException('Please enter a valid email address (e.g. name@example.com)');
       }
-    } else if (clean.startsWith('+1')) {
-      if (!/^\+1[2-9]\d{9}$/.test(clean)) {
-        throw new BadRequestException('US/Canada mobile numbers must have 10 digits');
+
+      // Check if email already registered
+      const existingEmail = await this.userRepository.findOne({
+        where: { email: ILike(clean) },
+      });
+      if (existingEmail) {
+        throw new BadRequestException('This email is already registered. Please sign in.');
       }
-    } else if (clean.startsWith('+91')) {
-      if (!/^\+91[6-9]\d{9}$/.test(clean)) {
-        throw new BadRequestException('Indian mobile numbers must have 10 digits starting with 6, 7, 8, or 9');
+    } else {
+      // Validate mobile number format strictly based on country
+      if (clean.startsWith('+94')) {
+        if (!/^\+947[0-9]{8}$/.test(clean)) {
+          throw new BadRequestException('Sri Lankan mobile numbers must have 9 digits starting with 7 (e.g. 77 123 4567)');
+        }
+      } else if (clean.startsWith('+')) {
+        if (!/^\+[1-9]\d{6,14}$/.test(clean)) {
+          throw new BadRequestException('Please enter a valid mobile number for the selected country');
+        }
       }
-    } else if (clean.startsWith('+44')) {
-      if (!/^\+447\d{9}$/.test(clean)) {
-        throw new BadRequestException('UK mobile numbers must have 10 digits starting with 7');
-      }
-    } else if (clean.startsWith('+971')) {
-      if (!/^\+9715\d{8}$/.test(clean)) {
-        throw new BadRequestException('UAE mobile numbers must have 9 digits starting with 5');
-      }
-    } else if (clean.startsWith('+')) {
-      if (!/^\+[1-9]\d{6,14}$/.test(clean)) {
-        throw new BadRequestException('Please enter a valid mobile number for the selected country');
+
+      // Check duplicate mobile in PostgreSQL
+      const existingPhone = await this.userRepository.findOne({
+        where: [{ phoneNumber: clean }, { username: clean.toLowerCase() }],
+      });
+      if (existingPhone) {
+        throw new BadRequestException('This mobile number is already registered. Please sign in.');
       }
     }
 
@@ -130,39 +140,7 @@ export class AuthService {
       throw new BadRequestException('Password must be at least 4 characters long');
     }
 
-    const cleanCurrency = (currency?.trim().toUpperCase() || 'USD').slice(0, 10);
-
-    // Build all candidate variations for comprehensive duplicate verification
-    const candidates = [clean.toLowerCase(), clean];
-    if (clean.startsWith('+94')) {
-      const national = clean.slice(3); // e.g. 784748345
-      candidates.push(national);
-      candidates.push(`0${national}`); // e.g. 0784748345
-    } else if (clean.startsWith('0') && clean.length === 10) {
-      candidates.push(`+94${clean.slice(1)}`);
-      candidates.push(clean.slice(1));
-    } else if (!clean.startsWith('+') && clean.length === 9) {
-      candidates.push(`+94${clean}`);
-      candidates.push(`0${clean}`);
-    }
-
-    const whereConditions = candidates.flatMap((c) => [
-      { username: c.toLowerCase() },
-      { phoneNumber: c },
-    ]);
-
-    // Check if user already exists in PostgreSQL
-    const existing = await this.userRepository.findOne({
-      where: whereConditions,
-    });
-    if (existing) {
-      throw new BadRequestException('This mobile number is already registered. Please sign in.');
-    }
-
-    // Hash password with bcrypt
-    const passwordHash = await bcrypt.hash(password, 10);
-
-    // Initial welcome balance (currently 0.0 per business requirements)
+    const cleanCurrency = (currency?.trim().toUpperCase() || 'LKR').slice(0, 10);
     const initialWelcomeBalance = 0.0;
 
     // Auto-generate guaranteed unique username (not existing in database)
@@ -170,8 +148,9 @@ export class AuthService {
 
     const newUser = this.userRepository.create({
       username: uniqueUsername,
-      phoneNumber: clean,
-      passwordHash,
+      email: isEmail ? clean.toLowerCase() : undefined,
+      phoneNumber: !isEmail ? clean : undefined,
+      passwordHash: await bcrypt.hash(password, 10),
       currency: cleanCurrency,
       balance: initialWelcomeBalance,
       gamesPlayed: 0,
@@ -181,29 +160,15 @@ export class AuthService {
 
     const savedUser = await this.userRepository.save(newUser);
 
-    // Record welcome bonus transaction in PostgreSQL ledger only if balance > 0
-    if (initialWelcomeBalance > 0) {
-      try {
-        await this.transactionRepository.save({
-          userId: savedUser.id,
-          type: 'DEPOSIT',
-          amount: initialWelcomeBalance,
-          currency: cleanCurrency,
-          multiplier: null,
-          balanceAfter: initialWelcomeBalance,
-        });
-      } catch (err) {
-        this.logger.warn('Failed to log welcome deposit transaction', err);
-      }
-    }
-
     const token = this.generateToken();
 
-    // Cache session and user in Redis for high-speed retrieval
+    // Cache session and user in Redis
     try {
-      await this.redisService.set(`token:${token}`, savedUser.username, 86400 * 7); // 7 days TTL
+      await this.redisService.set(`token:${token}`, savedUser.username, 86400 * 7);
       await this.redisService.set(`user:${savedUser.username.toLowerCase()}`, JSON.stringify(this.sanitizeUser(savedUser)));
-      await this.redisService.set(`user:${clean.toLowerCase()}`, JSON.stringify(this.sanitizeUser(savedUser)));
+      if (savedUser.email) {
+        await this.redisService.set(`user:${savedUser.email.toLowerCase()}`, JSON.stringify(this.sanitizeUser(savedUser)));
+      }
     } catch (err) {
       this.logger.warn('Failed to cache user in Redis', err);
     }
@@ -217,39 +182,31 @@ export class AuthService {
   async login(identifier: string, password: string): Promise<{ token: string; user: UserProfile }> {
     const clean = identifier?.trim().replace(/\s+/g, '');
     if (!clean || !password) {
-      throw new BadRequestException('Mobile number and password are required');
+      throw new BadRequestException('Email/Username and password are required');
     }
 
-    // Build candidate identifiers for flexible mobile number and username lookup
-    const candidates = [clean.toLowerCase(), clean];
-    if (clean.startsWith('0') && clean.length === 10) {
-      // Local 10-digit Sri Lankan format (e.g. 0771234567 -> +94771234567)
-      candidates.push(`+94${clean.slice(1)}`);
-    } else if (!clean.startsWith('+') && clean.length === 9) {
-      // 9 digits without leading 0 (e.g. 771234567 -> +94771234567)
-      candidates.push(`+94${clean}`);
-    } else if (clean.startsWith('+940')) {
-      // In case typed +94077...
-      candidates.push(`+94${clean.slice(4)}`);
-    }
-
-    // Find user in PostgreSQL by username (case-insensitive) OR phoneNumber across candidate formats
-    const whereConditions = [
+    const whereConditions: any[] = [
+      { email: ILike(clean) },
       { username: ILike(clean) },
-      ...candidates.flatMap((c) => [
-        { username: c },
-        { phoneNumber: c },
-      ]),
     ];
+
+    if (!clean.includes('@')) {
+      const candidates = [clean.toLowerCase(), clean];
+      if (clean.startsWith('0') && clean.length === 10) {
+        candidates.push(`+94${clean.slice(1)}`);
+      } else if (!clean.startsWith('+') && clean.length === 9) {
+        candidates.push(`+94${clean}`);
+      }
+      whereConditions.push(...candidates.map((c) => ({ phoneNumber: c })));
+    }
 
     const user = await this.userRepository.findOne({
       where: whereConditions,
     });
     if (!user) {
-      throw new UnauthorizedException('Invalid mobile number or password');
+      throw new UnauthorizedException('Invalid email, username, or password');
     }
 
-    // Verify password with bcrypt (with sha256 fallback if previously hashed)
     let isMatch = false;
     try {
       isMatch = await bcrypt.compare(password, user.passwordHash);
@@ -261,19 +218,17 @@ export class AuthService {
       const sha256Hash = crypto.createHash('sha256').update(password).digest('hex');
       if (sha256Hash === user.passwordHash) {
         isMatch = true;
-        // Upgrade password hash to bcrypt in background
         user.passwordHash = await bcrypt.hash(password, 10);
         await this.userRepository.save(user);
       }
     }
 
     if (!isMatch) {
-      throw new UnauthorizedException('Invalid username or password');
+      throw new UnauthorizedException('Invalid email, username, or password');
     }
 
     const token = this.generateToken();
 
-    // Cache session in Redis
     try {
       await this.redisService.set(`token:${token}`, user.username, 86400 * 7);
       await this.redisService.set(`user:${user.username}`, JSON.stringify(this.sanitizeUser(user)));
@@ -406,36 +361,21 @@ export class AuthService {
     return count > 0;
   }
 
-  async requestPasswordResetOtp(phone: string): Promise<{ success: boolean; message: string; devOtp?: string }> {
-    const clean = phone?.trim().replace(/\s+/g, '');
-    if (!clean || clean.length < 5) {
-      throw new BadRequestException('Please enter a valid mobile number');
+  async requestPasswordResetOtp(identifier: string): Promise<{ success: boolean; message: string; devOtp?: string }> {
+    const clean = identifier?.trim().replace(/\s+/g, '');
+    if (!clean || clean.length < 3) {
+      throw new BadRequestException('Please enter a valid email or mobile number');
     }
 
-    const candidates = [clean.toLowerCase(), clean];
-    if (clean.startsWith('+94')) {
-      const national = clean.slice(3);
-      candidates.push(national);
-      candidates.push(`0${national}`);
-    } else if (clean.startsWith('0') && clean.length === 10) {
-      candidates.push(`+94${clean.slice(1)}`);
-      candidates.push(clean.slice(1));
-    } else if (!clean.startsWith('+') && clean.length === 9) {
-      candidates.push(`+94${clean}`);
-      candidates.push(`0${clean}`);
-    }
-
-    const whereConditions = [
+    const whereConditions: any[] = [
+      { email: ILike(clean) },
       { username: ILike(clean) },
-      ...candidates.flatMap((c) => [
-        { username: c },
-        { phoneNumber: c },
-      ]),
+      { phoneNumber: clean },
     ];
 
     const user = await this.userRepository.findOne({ where: whereConditions });
     if (!user) {
-      throw new BadRequestException('No account found with this mobile number. Please register.');
+      throw new BadRequestException('No account found with this email/number. Please register.');
     }
 
     // Generate 6-digit OTP
@@ -443,7 +383,10 @@ export class AuthService {
 
     // Save in Redis for 5 minutes (300 seconds)
     try {
-      await this.redisService.set(`otp:${clean}`, otp, 300);
+      await this.redisService.set(`otp:${clean.toLowerCase()}`, otp, 300);
+      if (user.email) {
+        await this.redisService.set(`otp:${user.email.toLowerCase()}`, otp, 300);
+      }
       if (user.phoneNumber) {
         await this.redisService.set(`otp:${user.phoneNumber}`, otp, 300);
       }
@@ -451,24 +394,25 @@ export class AuthService {
       this.logger.warn('Failed to store OTP in Redis', err);
     }
 
-    this.logger.log(`🔑 Password reset OTP for ${user.phoneNumber || clean}: [ ${otp} ]`);
+    const target = user.email || user.phoneNumber || user.username;
+    this.logger.log(`🔑 Password reset OTP for ${target}: [ ${otp} ]`);
 
     return {
       success: true,
-      message: 'Verification code sent successfully',
+      message: `Verification code sent to ${target}`,
       devOtp: otp,
     };
   }
 
   async resetPassword(
-    phone: string,
+    identifier: string,
     otp: string,
     newPassword: string,
   ): Promise<{ success: boolean; message: string; token: string; user: UserProfile }> {
-    const clean = phone?.trim().replace(/\s+/g, '');
+    const clean = identifier?.trim().replace(/\s+/g, '');
     const cleanOtp = otp?.trim();
-    if (!clean || clean.length < 5) {
-      throw new BadRequestException('Please enter a valid mobile number');
+    if (!clean || clean.length < 3) {
+      throw new BadRequestException('Please enter a valid email or mobile number');
     }
     if (!cleanOtp || cleanOtp.length < 4) {
       throw new BadRequestException('Please enter the 6-digit verification code');
@@ -477,25 +421,10 @@ export class AuthService {
       throw new BadRequestException('New password must be at least 4 characters long');
     }
 
-    const candidates = [clean.toLowerCase(), clean];
-    if (clean.startsWith('+94')) {
-      const national = clean.slice(3);
-      candidates.push(national);
-      candidates.push(`0${national}`);
-    } else if (clean.startsWith('0') && clean.length === 10) {
-      candidates.push(`+94${clean.slice(1)}`);
-      candidates.push(clean.slice(1));
-    } else if (!clean.startsWith('+') && clean.length === 9) {
-      candidates.push(`+94${clean}`);
-      candidates.push(`0${clean}`);
-    }
-
-    const whereConditions = [
+    const whereConditions: any[] = [
+      { email: ILike(clean) },
       { username: ILike(clean) },
-      ...candidates.flatMap((c) => [
-        { username: c },
-        { phoneNumber: c },
-      ]),
+      { phoneNumber: clean },
     ];
 
     const user = await this.userRepository.findOne({ where: whereConditions });
@@ -506,7 +435,10 @@ export class AuthService {
     // Verify OTP against Redis
     let savedOtp: string | null = null;
     try {
-      savedOtp = (await this.redisService.get(`otp:${clean}`)) || (user.phoneNumber ? await this.redisService.get(`otp:${user.phoneNumber}`) : null);
+      savedOtp =
+        (await this.redisService.get(`otp:${clean.toLowerCase()}`)) ||
+        (user.email ? await this.redisService.get(`otp:${user.email.toLowerCase()}`) : null) ||
+        (user.phoneNumber ? await this.redisService.get(`otp:${user.phoneNumber}`) : null);
     } catch {}
 
     const isDevOverride = cleanOtp === '123456';
@@ -521,10 +453,9 @@ export class AuthService {
 
     // Invalidate used OTP
     try {
-      await this.redisService.del(`otp:${clean}`);
-      if (user.phoneNumber) {
-        await this.redisService.del(`otp:${user.phoneNumber}`);
-      }
+      await this.redisService.del(`otp:${clean.toLowerCase()}`);
+      if (user.email) await this.redisService.del(`otp:${user.email.toLowerCase()}`);
+      if (user.phoneNumber) await this.redisService.del(`otp:${user.phoneNumber}`);
     } catch {}
 
     const token = this.generateToken();

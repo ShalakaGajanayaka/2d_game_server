@@ -29,6 +29,9 @@ export class User {
   @Column({ nullable: true })
   phoneNumber: string;
 
+  @Column({ nullable: true, unique: true })
+  email: string;
+
   @CreateDateColumn()
   createdAt: Date;
 
