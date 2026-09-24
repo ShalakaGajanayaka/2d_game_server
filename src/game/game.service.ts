@@ -282,16 +282,25 @@ export class GameService {
   }
 
   private generateCrashPoint(): number {
-    // FOMO (Fear Of Missing Out) Strategy
-    // If there are no real bets in this round, give a 15% chance to hit a high "bait" multiplier (10x - 100x)
+    // 3-Tier Bait System (When no real bets are active)
     if (this.activeRealLiability === 0) {
-      if (Math.random() < 0.15) {
+      const rand = Math.random();
+      if (rand < 0.15) {
+        // 15% chance for Super FOMO (10x - 100x)
         const fomoPoint = 10 + Math.random() * 90;
         return parseFloat(fomoPoint.toFixed(2));
+      } else if (rand < 0.60) {
+        // 45% chance for Mid-Bait (2.0x - 10.0x)
+        const midPoint = 2.0 + Math.random() * 8.0;
+        return parseFloat(midPoint.toFixed(2));
+      } else {
+        // 40% chance for Normal Low (1.01x - 2.0x)
+        const lowPoint = 1.01 + Math.random() * 0.99;
+        return parseFloat(lowPoint.toFixed(2));
       }
     }
 
-    // Default standard crash algorithm
+    // Default standard crash algorithm (when real bets are active)
     const e = 100 / (Math.random() * 100 + 1);
     const point = Math.max(1.01, e);
     return parseFloat(point.toFixed(2));
