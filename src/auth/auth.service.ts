@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, UnauthorizedException, Logger } from '@nestjs/common';
+import { Injectable, BadRequestException, UnauthorizedException, Logger, Inject, forwardRef } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike } from 'typeorm';
 import * as bcrypt from 'bcrypt';
@@ -8,6 +8,7 @@ import { RedisService } from '../redis/redis.service';
 import { User } from './entities/user.entity';
 import { Transaction } from './entities/transaction.entity';
 import { BetHistory } from './entities/bet-history.entity';
+import { GameService } from '../game/game.service';
 
 export const COUNTRY_TO_CURRENCY: Record<string, string> = {
   LK: 'LKR',
@@ -111,6 +112,8 @@ export class AuthService {
     @InjectRepository(BetHistory)
     private readonly betHistoryRepository: Repository<BetHistory>,
     private readonly redisService: RedisService,
+    @Inject(forwardRef(() => GameService))
+    private readonly gameService: GameService,
   ) {}
 
   private generateToken(): string {
@@ -400,6 +403,15 @@ export class AuthService {
       if (winDelta > 0) {
         user.totalWon = Number(user.totalWon) + winDelta;
         txType = 'CASHOUT';
+        // The user cashed out. The bet amount was already deducted during BET.
+        // The winDelta is the pure profit. Win Amount = betAmount + winDelta.
+        // Wait, the client sends `winDelta = winAmount - betAmount` or something?
+        // Let's assume winAmount is sent directly or we can deduce it.
+        // Actually, we don't have the original betAmount here. 
+        // But wait, the client passes `winDelta`. If `winDelta` is the net profit, `winAmount` = `betAmount + winDelta`...
+        // Let's just track the global pool change: the pool decreases by winAmount. 
+        // But the client only passes winDelta. No wait, the client updates balance to newBalance. 
+        // If balance increases, `diff` is the winAmount!
       } else {
         txType = 'BET';
       }
@@ -427,6 +439,18 @@ export class AuthService {
           multiplier: mult ?? null,
           balanceAfter: balanceNum,
         });
+
+        // Inform GameService about the real liability changes
+        if (txType === 'BET') {
+          this.gameService.registerRealBet(diff);
+        } else if (txType === 'CASHOUT') {
+          // In crash, cashout diff is the full winAmount (bet * multiplier).
+          // We need the original betAmount to reduce activeRealLiability.
+          // Since we don't have it easily here, we can approximate: betAmount = winAmount / multiplier.
+          const winAmount = diff;
+          const betAmount = mult ? winAmount / mult : 0;
+          this.gameService.registerRealCashout(betAmount, winAmount);
+        }
       } catch (err) {
         this.logger.error('Failed to save transaction ledger', err);
       }

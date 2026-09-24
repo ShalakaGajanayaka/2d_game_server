@@ -51,11 +51,32 @@ export class GameService {
   private currentRoundBets: LiveBet[] = [];
   private pendingRoundBots: LiveBet[] = [];
 
+  // Company virtual pool variables
+  private globalPool: number = 10000;
+  private activeRealLiability: number = 0;
+  private companyProfitMargin: number = 0.3; // 30%
+
   public setServer(server: Server) {
     this.server = server;
     // Start the game loop when server is attached
     if (this.status === GameStatus.WAITING && this.countdown === 10) {
       this.startCountdown();
+    }
+  }
+
+  public registerRealBet(amount: number) {
+    if (this.status === GameStatus.WAITING) {
+      this.globalPool += amount * (1 - this.companyProfitMargin);
+      this.activeRealLiability += amount;
+      this.logger.log(`Real bet added: ${amount}. Pool: ${this.globalPool}, Liability: ${this.activeRealLiability}`);
+    }
+  }
+
+  public registerRealCashout(betAmount: number, winAmount: number) {
+    if (this.status === GameStatus.PLAYING) {
+      this.activeRealLiability -= betAmount;
+      this.globalPool -= winAmount;
+      this.logger.log(`Real cashout: Bet ${betAmount}, Win ${winAmount}. Pool: ${this.globalPool}, Liability: ${this.activeRealLiability}`);
     }
   }
 
@@ -124,6 +145,7 @@ export class GameService {
     this.status = GameStatus.WAITING;
     this.countdown = 10;
     this.currentMultiplier = 1.0;
+    this.activeRealLiability = 0; // Reset for the new round
     
     // Generate pool of 120 - 260 bots
     const allBots = this.generateRoundBots();
@@ -220,6 +242,17 @@ export class GameService {
               winAmount,
             });
           }
+        }
+      }
+
+      // Dynamic Liability Crash Logic (Pool-based constraint)
+      if (this.activeRealLiability > 0) {
+        const potentialPayout = this.activeRealLiability * this.currentMultiplier;
+        if (potentialPayout >= this.globalPool) {
+          this.logger.warn(`Forced Crash! Potential payout (${potentialPayout}) exceeds global pool (${this.globalPool})`);
+          this.crashPoint = this.currentMultiplier;
+          this.crash();
+          return;
         }
       }
 
