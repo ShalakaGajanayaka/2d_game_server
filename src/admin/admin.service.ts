@@ -134,6 +134,8 @@ export class AdminService {
 
     const allUsers = await this.userRepo.find();
     const totalSystemBalance = allUsers.reduce((sum, u) => sum + Number(u.balance), 0);
+    
+    const globalPool = this.gameService.getGlobalPool();
 
     return {
       totalUsers,
@@ -144,6 +146,7 @@ export class AdminService {
       paidWithdrawals,
       totalWithdrawnAmount,
       totalSystemBalance,
+      globalPool,
     };
   }
 

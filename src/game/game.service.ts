@@ -64,6 +64,10 @@ export class GameService {
     }
   }
 
+  public getGlobalPool(): number {
+    return this.globalPool;
+  }
+
   public registerRealBet(amount: number) {
     if (this.status === GameStatus.WAITING) {
       this.globalPool += amount * (1 - this.companyProfitMargin);
