@@ -7,6 +7,7 @@ import * as geoip from 'geoip-lite';
 import { RedisService } from '../redis/redis.service';
 import { User } from './entities/user.entity';
 import { Transaction } from './entities/transaction.entity';
+import { BetHistory } from './entities/bet-history.entity';
 
 export const COUNTRY_TO_CURRENCY: Record<string, string> = {
   LK: 'LKR',
@@ -107,6 +108,8 @@ export class AuthService {
     private readonly userRepository: Repository<User>,
     @InjectRepository(Transaction)
     private readonly transactionRepository: Repository<Transaction>,
+    @InjectRepository(BetHistory)
+    private readonly betHistoryRepository: Repository<BetHistory>,
     private readonly redisService: RedisService,
   ) {}
 
@@ -410,6 +413,42 @@ export class AuthService {
       balance: sanitized.balance,
       user: sanitized,
     };
+  }
+
+  async getBetHistory(token: string): Promise<BetHistory[]> {
+    const username = await this.redisService.get(`token:${token}`);
+    if (!username) throw new UnauthorizedException('Session expired');
+
+    const user = await this.userRepository.findOne({ where: { username } });
+    if (!user) throw new UnauthorizedException('User not found');
+
+    return this.betHistoryRepository.find({
+      where: { userId: user.id },
+      order: { createdAt: 'DESC' },
+      take: 50,
+    });
+  }
+
+  async saveBetHistory(
+    token: string,
+    data: { betAmount: number; cashOutMultiplier: number | null; crashPoint: number; winAmount: number; currency: string }
+  ): Promise<BetHistory> {
+    const username = await this.redisService.get(`token:${token}`);
+    if (!username) throw new UnauthorizedException('Session expired');
+
+    const user = await this.userRepository.findOne({ where: { username } });
+    if (!user) throw new UnauthorizedException('User not found');
+
+    const bet = this.betHistoryRepository.create({
+      userId: user.id,
+      betAmount: data.betAmount,
+      cashOutMultiplier: data.cashOutMultiplier,
+      crashPoint: data.crashPoint,
+      winAmount: data.winAmount,
+      currency: data.currency || user.currency || 'USD',
+    });
+
+    return this.betHistoryRepository.save(bet);
   }
 
   async checkPhoneExists(phone: string): Promise<boolean> {

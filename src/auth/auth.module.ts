@@ -6,9 +6,10 @@ import { RedisModule } from '../redis/redis.module';
 import { User } from './entities/user.entity';
 import { Transaction } from './entities/transaction.entity';
 import { DepositRequest } from './entities/deposit-request.entity';
+import { BetHistory } from './entities/bet-history.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([User, Transaction, DepositRequest]), RedisModule],
+  imports: [TypeOrmModule.forFeature([User, Transaction, DepositRequest, BetHistory]), RedisModule],
   controllers: [AuthController],
   providers: [AuthService],
   exports: [AuthService],

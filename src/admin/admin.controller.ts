@@ -91,6 +91,7 @@ export class AdminController {
       currency?: string;
       method: string;
       payoutDetails: any;
+      saveDetails?: boolean;
     },
   ) {
     if (!body.token) {

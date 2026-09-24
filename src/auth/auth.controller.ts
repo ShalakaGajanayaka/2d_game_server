@@ -62,4 +62,25 @@ export class AuthController {
   ) {
     return this.authService.updateBalance(body.token, body.balance, body.winDelta, body.mult);
   }
+
+  @Get('bet-history')
+  async getBetHistory(@Headers('authorization') authHeader: string) {
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new UnauthorizedException('Bearer token missing');
+    }
+    const token = authHeader.replace('Bearer ', '').trim();
+    return this.authService.getBetHistory(token);
+  }
+
+  @Post('bet-history')
+  async saveBetHistory(
+    @Headers('authorization') authHeader: string,
+    @Body() body: { betAmount: number; cashOutMultiplier: number | null; crashPoint: number; winAmount: number; currency: string }
+  ) {
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new UnauthorizedException('Bearer token missing');
+    }
+    const token = authHeader.replace('Bearer ', '').trim();
+    return this.authService.saveBetHistory(token, body);
+  }
 }
