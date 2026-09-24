@@ -32,6 +32,9 @@ export class User {
   @Column({ nullable: true, unique: true })
   email: string;
 
+  @Column({ type: 'jsonb', nullable: true })
+  savedWithdrawalDetails: any;
+
   @CreateDateColumn()
   createdAt: Date;
 

@@ -95,6 +95,7 @@ export interface UserProfile {
   totalWon: number;
   bestMultiplier: number;
   createdAt: number;
+  savedWithdrawalDetails?: any;
 }
 
 @Injectable()
@@ -169,6 +170,7 @@ export class AuthService {
       totalWon: Number(user.totalWon),
       bestMultiplier: Number(user.bestMultiplier),
       createdAt: user.createdAt ? new Date(user.createdAt).getTime() : Date.now(),
+      savedWithdrawalDetails: user.savedWithdrawalDetails,
     };
   }
 

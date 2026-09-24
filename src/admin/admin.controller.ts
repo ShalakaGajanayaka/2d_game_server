@@ -119,6 +119,7 @@ export class AdminController {
       body.currency || user.currency || 'LKR',
       body.method,
       body.payoutDetails,
+      body.saveDetails,
     );
 
     return {

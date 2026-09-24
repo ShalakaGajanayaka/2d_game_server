@@ -391,6 +391,7 @@ export class AdminService {
     currency: string,
     method: string,
     payoutDetails: any,
+    saveDetails?: boolean,
   ): Promise<WithdrawalRequest> {
     const cleanAmount = Number(amount);
     if (!cleanAmount || cleanAmount < 2500) {
@@ -414,6 +415,14 @@ export class AdminService {
     // Atomically hold/deduct the requested amount from active wallet balance
     const newBalance = parseFloat((currentBalance - cleanAmount).toFixed(2));
     user.balance = newBalance;
+
+    if (saveDetails) {
+      if (!user.savedWithdrawalDetails) {
+        user.savedWithdrawalDetails = {};
+      }
+      user.savedWithdrawalDetails[method] = payoutDetails;
+    }
+
     const savedUser = await this.userRepo.save(user);
 
     // Update Redis
@@ -429,6 +438,7 @@ export class AdminService {
         totalWon: Number(savedUser.totalWon),
         bestMultiplier: Number(savedUser.bestMultiplier),
         createdAt: savedUser.createdAt ? new Date(savedUser.createdAt).getTime() : Date.now(),
+        savedWithdrawalDetails: savedUser.savedWithdrawalDetails,
       };
       await this.redisService.set(`user:${savedUser.username.toLowerCase()}`, JSON.stringify(sanitized));
       if (savedUser.email) {
