@@ -56,6 +56,21 @@ export class AuthController {
     return this.authService.getProfile(token);
   }
 
+  @Post('rename')
+  async renameUser(
+    @Headers('authorization') authHeader: string,
+    @Body('newUsername') newUsername: string,
+  ) {
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new UnauthorizedException('Bearer token missing');
+    }
+    if (!newUsername || newUsername.trim().length < 3) {
+      throw new BadRequestException('Username must be at least 3 characters long');
+    }
+    const token = authHeader.replace('Bearer ', '').trim();
+    return this.authService.renameUser(token, newUsername.trim());
+  }
+
   @Post('update-balance')
   async updateBalance(
     @Body() body: { token: string; balance: number; winDelta?: number; mult?: number },

@@ -340,6 +340,36 @@ export class AuthService {
     return this.sanitizeUser(user);
   }
 
+  async renameUser(token: string, newUsername: string): Promise<UserProfile> {
+    const oldUsername = await this.redisService.get(`token:${token}`);
+    if (!oldUsername) {
+      throw new UnauthorizedException('Invalid or expired session');
+    }
+
+    const existingUser = await this.userRepository.findOne({ where: { username: ILike(newUsername) } });
+    if (existingUser) {
+      throw new BadRequestException('Username is already taken');
+    }
+
+    const user = await this.userRepository.findOne({ where: { username: oldUsername } });
+    if (!user) {
+      throw new UnauthorizedException('User not found');
+    }
+
+    user.username = newUsername;
+    const savedUser = await this.userRepository.save(user);
+
+    try {
+      await this.redisService.set(`token:${token}`, newUsername);
+      await this.redisService.set(`user:${newUsername.toLowerCase()}`, JSON.stringify(this.sanitizeUser(savedUser)));
+      await this.redisService.del(`user:${oldUsername.toLowerCase()}`);
+    } catch (err) {
+      this.logger.warn('Failed to update redis on rename', err);
+    }
+
+    return this.sanitizeUser(savedUser);
+  }
+
   async updateBalance(
     token: string,
     newBalance: number,
