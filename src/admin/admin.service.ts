@@ -393,8 +393,8 @@ export class AdminService {
     payoutDetails: any,
   ): Promise<WithdrawalRequest> {
     const cleanAmount = Number(amount);
-    if (!cleanAmount || cleanAmount < 100) {
-      throw new BadRequestException('Minimum withdrawal amount is 100');
+    if (!cleanAmount || cleanAmount < 2500) {
+      throw new BadRequestException('Minimum withdrawal amount is 2500');
     }
 
     if (!payoutDetails) {
