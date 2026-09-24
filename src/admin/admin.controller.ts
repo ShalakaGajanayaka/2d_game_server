@@ -8,12 +8,15 @@ import {
   Res,
   UnauthorizedException,
   BadRequestException,
+  UseGuards,
 } from '@nestjs/common';
 import { AdminService } from './admin.service';
 import { RedisService } from '../redis/redis.service';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User } from '../auth/entities/user.entity';
+import { AdminAuthGuard } from './admin.guard';
+import * as crypto from 'crypto';
 
 @Controller('admin')
 export class AdminController {
@@ -161,11 +164,30 @@ export class AdminController {
   // ADMIN REST APIS
   // -------------------------------------------------------------
 
+  @Post('api/login')
+  async adminLogin(@Body() body: any) {
+    const adminUsername = process.env.ADMIN_USERNAME;
+    const adminPassword = process.env.ADMIN_PASSWORD;
+    if (!adminUsername || !adminPassword) {
+      throw new UnauthorizedException('Admin credentials not configured on server');
+    }
+
+    if (body.username === adminUsername && body.password === adminPassword) {
+      const token = crypto.randomBytes(32).toString('hex');
+      await this.redisService.set(`admin_token:${token}`, 'admin', 86400); // 24 hours
+      return { token };
+    }
+
+    throw new UnauthorizedException('Invalid credentials');
+  }
+
+  @UseGuards(AdminAuthGuard)
   @Get('api/stats')
   async getStats() {
     return this.adminService.getDashboardStats();
   }
 
+  @UseGuards(AdminAuthGuard)
   @Get('api/deposits')
   async getDeposits(
     @Query('status') status?: string,
@@ -175,6 +197,7 @@ export class AdminController {
     return this.adminService.getDeposits(status, numLimit);
   }
 
+  @UseGuards(AdminAuthGuard)
   @Get('api/withdrawals')
   async getWithdrawals(
     @Query('status') status?: string,
@@ -184,6 +207,7 @@ export class AdminController {
     return this.adminService.getWithdrawals(status, numLimit);
   }
 
+  @UseGuards(AdminAuthGuard)
   @Post('api/withdrawals/:id/approve')
   async approveWithdrawal(
     @Param('id') id: string,
@@ -192,6 +216,7 @@ export class AdminController {
     return this.adminService.approveWithdrawal(id, body?.adminNote, body?.adminUser || 'Admin');
   }
 
+  @UseGuards(AdminAuthGuard)
   @Post('api/withdrawals/:id/reject')
   async rejectWithdrawal(
     @Param('id') id: string,
@@ -200,6 +225,7 @@ export class AdminController {
     return this.adminService.rejectWithdrawal(id, body?.reason, body?.adminUser || 'Admin');
   }
 
+  @UseGuards(AdminAuthGuard)
   @Post('api/deposits/:id/approve')
   async approveDeposit(
     @Param('id') id: string,
@@ -208,6 +234,7 @@ export class AdminController {
     return this.adminService.approveDeposit(id, body?.adminUser || 'Admin');
   }
 
+  @UseGuards(AdminAuthGuard)
   @Post('api/deposits/:id/reject')
   async rejectDeposit(
     @Param('id') id: string,
@@ -216,6 +243,7 @@ export class AdminController {
     return this.adminService.rejectDeposit(id, body?.reason, body?.adminUser || 'Admin');
   }
 
+  @UseGuards(AdminAuthGuard)
   @Post('api/manual-credit')
   async manualCredit(
     @Body()
@@ -234,6 +262,7 @@ export class AdminController {
     );
   }
 
+  @UseGuards(AdminAuthGuard)
   @Get('api/users')
   async getUsers(
     @Query('search') search?: string,
