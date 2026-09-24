@@ -11,6 +11,7 @@ import { User } from './auth/entities/user.entity';
 import { Transaction } from './auth/entities/transaction.entity';
 import { DepositRequest } from './auth/entities/deposit-request.entity';
 import { WithdrawalRequest } from './auth/entities/withdrawal-request.entity';
+import { BetHistory } from './auth/entities/bet-history.entity';
 
 @Module({
   imports: [
@@ -25,7 +26,7 @@ import { WithdrawalRequest } from './auth/entities/withdrawal-request.entity';
         username: config.get<string>('DB_USER', 'postgres'),
         password: config.get<string>('DB_PASSWORD', '12345678'),
         database: config.get<string>('DB_NAME', 'skyrush_db'),
-        entities: [User, Transaction, DepositRequest, WithdrawalRequest],
+        entities: [User, Transaction, DepositRequest, WithdrawalRequest, BetHistory],
         synchronize: true, // Auto-create tables in PostgreSQL
       }),
     }),
