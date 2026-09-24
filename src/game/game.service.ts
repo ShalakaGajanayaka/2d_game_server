@@ -54,7 +54,7 @@ export class GameService {
   // Company virtual pool variables
   private globalPool: number = 10000;
   private activeRealLiability: number = 0;
-  private companyProfitMargin: number = 0.3; // 30%
+  private companyProfitMargin: number = 0.05; // 5%
 
   public setServer(server: Server) {
     this.server = server;
