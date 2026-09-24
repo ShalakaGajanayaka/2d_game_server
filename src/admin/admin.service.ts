@@ -417,10 +417,9 @@ export class AdminService {
     user.balance = newBalance;
 
     if (saveDetails) {
-      if (!user.savedWithdrawalDetails) {
-        user.savedWithdrawalDetails = {};
-      }
-      user.savedWithdrawalDetails[method] = payoutDetails;
+      const currentDetails = user.savedWithdrawalDetails || {};
+      currentDetails[method] = payoutDetails;
+      user.savedWithdrawalDetails = { ...currentDetails };
     }
 
     const savedUser = await this.userRepo.save(user);
