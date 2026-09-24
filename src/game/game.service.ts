@@ -282,6 +282,16 @@ export class GameService {
   }
 
   private generateCrashPoint(): number {
+    // FOMO (Fear Of Missing Out) Strategy
+    // If there are no real bets in this round, give a 15% chance to hit a high "bait" multiplier (10x - 100x)
+    if (this.activeRealLiability === 0) {
+      if (Math.random() < 0.15) {
+        const fomoPoint = 10 + Math.random() * 90;
+        return parseFloat(fomoPoint.toFixed(2));
+      }
+    }
+
+    // Default standard crash algorithm
     const e = 100 / (Math.random() * 100 + 1);
     const point = Math.max(1.01, e);
     return parseFloat(point.toFixed(2));
