@@ -128,8 +128,9 @@ export PATH="$PATH:/opt/flutter/bin"
 git config --global --add safe.directory /opt/flutter
 
 cd /var/www/skyrush/game_app
+echo "SERVER_API_URL=http://94.136.190.213" > .env
 /opt/flutter/bin/flutter config --no-analytics
-/opt/flutter/bin/flutter build web --release
+/opt/flutter/bin/flutter build web --release --no-wasm-dry-run
 
 mkdir -p /var/www/skyrush/game_web
 cp -rf build/web/* /var/www/skyrush/game_web/
