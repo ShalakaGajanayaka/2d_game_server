@@ -103,8 +103,8 @@ echo "🖥️ [7/8] Building and Launching Next.js Dashboard..."
 cd /var/www/skyrush/dashboard
 
 cat << 'EOF' > .env.local
-NEXT_PUBLIC_API_URL=http://94.136.190.213:3000
-NEXT_PUBLIC_SOCKET_URL=http://94.136.190.213:3000
+NEXT_PUBLIC_API_URL=https://engine.skyrush.cc
+NEXT_PUBLIC_SOCKET_URL=https://engine.skyrush.cc
 EOF
 
 npm install --production=false
@@ -128,21 +128,21 @@ export PATH="$PATH:/opt/flutter/bin"
 git config --global --add safe.directory /opt/flutter
 
 cd /var/www/skyrush/game_app
-echo "SERVER_API_URL=http://94.136.190.213" > .env
+echo "SERVER_API_URL=https://engine.skyrush.cc" > .env
 /opt/flutter/bin/flutter config --no-analytics
 /opt/flutter/bin/flutter build web --release --no-wasm-dry-run
 
 mkdir -p /var/www/skyrush/game_web
 cp -rf build/web/* /var/www/skyrush/game_web/
 
-# Configure Nginx Reverse Proxy
+# Configure Nginx Reverse Proxy with Virtual Hosts
 cat << 'EOF' > /etc/nginx/sites-available/default
+# 1. Frontend Web Game (skyrush.cc & www.skyrush.cc)
 server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name _;
+    listen 80;
+    listen [::]:80;
+    server_name skyrush.cc www.skyrush.cc;
 
-    # Flutter Game Web App
     root /var/www/skyrush/game_web;
     index index.html;
 
@@ -150,7 +150,6 @@ server {
         try_files $uri $uri/ /index.html;
     }
 
-    # WebSocket & Realtime Socket.IO
     location /socket.io/ {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
@@ -159,10 +158,81 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # Backend Auth & Game APIs
+    location /auth/ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# 2. Game Engine Realtime Backend (engine.skyrush.cc)
+server {
+    listen 80;
+    listen [::]:80;
+    server_name engine.skyrush.cc;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+}
+
+# 3. Secret Admin Mission Control (hq-ops-99.skyrush.cc)
+server {
+    listen 80;
+    listen [::]:80;
+    server_name hq-ops-99.skyrush.cc;
+
+    location / {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# 4. Fallback Default Server (Raw IP access: 94.136.190.213)
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    root /var/www/skyrush/game_web;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /socket.io/ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
     location /auth/ {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
@@ -171,7 +241,6 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 
-    # Backend Admin APIs
     location /admin/ {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
@@ -185,18 +254,19 @@ EOF
 nginx -t
 systemctl restart nginx
 
-# Firewall Setup
+# Firewall Setup - Lock down raw backend ports to protect origin IP
 ufw allow OpenSSH
 ufw allow 80/tcp
 ufw allow 443/tcp
-ufw allow 3000/tcp
-ufw allow 3001/tcp
+ufw delete allow 3000/tcp 2>/dev/null || true
+ufw delete allow 3001/tcp 2>/dev/null || true
 echo "y" | ufw enable || true
 
 echo "=========================================================="
 echo "🎉 DEPLOYMENT SUCCESSFUL! SKYRUSH AVIATOR IS NOW LIVE! 🎉"
 echo "=========================================================="
-echo "🎮 Aviator Game (Web):     http://94.136.190.213"
-echo "📊 Mission Control Admin:  http://94.136.190.213:3001"
-echo "⚡ Backend API (Socket):   http://94.136.190.213:3000"
+echo "🎮 Aviator Game (Web):     https://skyrush.cc"
+echo "⚡ Realtime Game Engine:   https://engine.skyrush.cc"
+echo "📊 Secret Admin Control:   https://hq-ops-99.skyrush.cc"
 echo "=========================================================="
+
