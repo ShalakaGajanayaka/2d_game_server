@@ -37,6 +37,7 @@ sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = 'skyrush_db
 echo "📁 [5/8] Cloning / Pulling source code from GitHub..."
 mkdir -p /var/www/skyrush
 cd /var/www/skyrush
+git config --global credential.helper store
 
 # Backend Server
 if [ -d "server/.git" ]; then
@@ -48,6 +49,9 @@ else
 fi
 
 # Dashboard
+if [ -d "dashboard" ] && [ ! -d "dashboard/.git" ]; then
+    rm -rf dashboard
+fi
 if [ -d "dashboard/.git" ]; then
     echo "🔄 Updating Dashboard from GitHub..."
     cd dashboard && git pull origin main && cd ..
@@ -57,6 +61,9 @@ else
 fi
 
 # Game App
+if [ -d "game_app" ] && [ ! -d "game_app/.git" ]; then
+    rm -rf game_app
+fi
 if [ -d "game_app/.git" ]; then
     echo "🔄 Updating Game App from GitHub..."
     cd game_app && git pull origin main && cd ..
