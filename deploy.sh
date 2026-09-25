@@ -9,7 +9,7 @@ echo "=========================================================="
 echo "📦 [1/8] Updating system packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y curl wget git build-essential ufw nginx postgresql postgresql-contrib redis-server
+apt-get install -y curl wget git build-essential ufw nginx postgresql postgresql-contrib redis-server unzip
 
 # 2. Install Node.js 20 LTS and PM2
 echo "📦 [2/8] Installing Node.js 20 LTS and PM2..."
