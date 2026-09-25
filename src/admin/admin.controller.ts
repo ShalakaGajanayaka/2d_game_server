@@ -198,6 +198,30 @@ export class AdminController {
   }
 
   @UseGuards(AdminAuthGuard)
+  @Post('api/pool/adjust')
+  async adjustPool(
+    @Body()
+    body: {
+      action: 'TOP_UP' | 'PROFIT_SKIM' | 'SET_TARGET';
+      amount: number;
+      note?: string;
+      adminUser?: string;
+    },
+  ) {
+    if (!body.action || typeof body.amount !== 'number' || isNaN(body.amount) || body.amount <= 0) {
+      throw new BadRequestException('Action and a positive amount are required');
+    }
+    return this.adminService.adjustPool(body);
+  }
+
+  @UseGuards(AdminAuthGuard)
+  @Get('api/pool/logs')
+  async getPoolLogs(@Query('limit') limit?: string) {
+    const numLimit = limit ? parseInt(limit, 10) : 20;
+    return this.adminService.getPoolAuditLogs(numLimit);
+  }
+
+  @UseGuards(AdminAuthGuard)
   @Get('api/deposits')
   async getDeposits(
     @Query('status') status?: string,

@@ -5,6 +5,7 @@ import { User } from '../auth/entities/user.entity';
 import { Transaction } from '../auth/entities/transaction.entity';
 import { DepositRequest, DepositStatus } from '../auth/entities/deposit-request.entity';
 import { WithdrawalRequest, WithdrawalStatus } from '../auth/entities/withdrawal-request.entity';
+import { PoolAuditLog } from '../auth/entities/pool-audit-log.entity';
 import { RedisService } from '../redis/redis.service';
 import { GameService } from '../game/game.service';
 
@@ -32,6 +33,8 @@ export class AdminService {
     private readonly depositRepo: Repository<DepositRequest>,
     @InjectRepository(WithdrawalRequest)
     private readonly withdrawalRepo: Repository<WithdrawalRequest>,
+    @InjectRepository(PoolAuditLog)
+    private readonly poolAuditRepo: Repository<PoolAuditLog>,
     private readonly redisService: RedisService,
     private readonly gameService: GameService,
   ) {}
@@ -158,6 +161,56 @@ export class AdminService {
 
   async setGlobalPool(amount: number): Promise<number> {
     return this.gameService.setGlobalPool(amount);
+  }
+
+  async adjustPool(dto: {
+    action: 'TOP_UP' | 'PROFIT_SKIM' | 'SET_TARGET';
+    amount: number;
+    note?: string;
+    adminUser?: string;
+  }): Promise<{ success: boolean; globalPool: number; auditLog: PoolAuditLog }> {
+    const currentPool = this.gameService.getGlobalPool();
+    let target = currentPool;
+
+    if (dto.action === 'TOP_UP') {
+      target = currentPool + dto.amount;
+    } else if (dto.action === 'PROFIT_SKIM') {
+      target = currentPool - dto.amount;
+    } else if (dto.action === 'SET_TARGET') {
+      target = dto.amount;
+    } else {
+      throw new BadRequestException('Invalid pool action');
+    }
+
+    if (target < GameService.MIN_POOL_FLOOR) {
+      throw new BadRequestException(
+        `Target pool (LKR ${target.toLocaleString()}) cannot be less than safety minimum LKR ${GameService.MIN_POOL_FLOOR.toLocaleString()}`
+      );
+    }
+
+    const updatedPool = await this.gameService.setGlobalPool(target);
+
+    const log = await this.poolAuditRepo.save({
+      adminUser: dto.adminUser || 'Admin',
+      action: dto.action,
+      previousAmount: currentPool,
+      newAmount: updatedPool,
+      delta: parseFloat((updatedPool - currentPool).toFixed(2)),
+      note: dto.note || '',
+    });
+
+    return {
+      success: true,
+      globalPool: updatedPool,
+      auditLog: log,
+    };
+  }
+
+  async getPoolAuditLogs(limit: number = 20): Promise<PoolAuditLog[]> {
+    return this.poolAuditRepo.find({
+      order: { createdAt: 'DESC' },
+      take: limit,
+    });
   }
 
   async getDeposits(status?: string, limit: number = 50): Promise<DepositRequest[]> {

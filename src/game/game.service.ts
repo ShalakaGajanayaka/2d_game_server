@@ -82,18 +82,43 @@ export class GameService implements OnModuleInit {
     }
   }
 
+  // Minimum safety floor to prevent infinite forced 1.01x crash loops
+  public static readonly MIN_POOL_FLOOR: number = 5000;
+
   public getGlobalPool(): number {
     return this.globalPool;
   }
 
+  public getActiveRealLiability(): number {
+    return this.activeRealLiability;
+  }
+
   public async setGlobalPool(amount: number): Promise<number> {
-    this.globalPool = Math.max(0, parseFloat(amount.toFixed(2)));
+    const target = parseFloat(amount.toFixed(2));
+    if (target < GameService.MIN_POOL_FLOOR) {
+      throw new Error(`Cannot set pool (LKR ${target}) below minimum safety floor LKR ${GameService.MIN_POOL_FLOOR}`);
+    }
+
+    // Safety lock: if round is playing and has active bets, do not lower pool below current liability
+    if (this.status === GameStatus.PLAYING && target < this.activeRealLiability) {
+      throw new Error(`Cannot set pool (LKR ${target}) below active round liability (LKR ${this.activeRealLiability}) during flight`);
+    }
+
+    this.globalPool = target;
     try {
       await this.redisService.set('game:global_pool', this.globalPool.toString());
     } catch (err) {
       this.logger.warn('Failed to persist global pool to Redis', err);
     }
     this.logger.log(`Global Pool updated manually to: ${this.globalPool}`);
+
+    if (this.server) {
+      this.server.emit('globalPoolUpdated', {
+        globalPool: this.globalPool,
+        timestamp: Date.now(),
+      });
+    }
+
     return this.globalPool;
   }
 
