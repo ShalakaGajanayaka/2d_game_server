@@ -442,14 +442,14 @@ export class AuthService {
 
         // Inform GameService about the real liability changes
         if (txType === 'BET') {
-          this.gameService.registerRealBet(diff);
+          await this.gameService.registerRealBet(diff);
         } else if (txType === 'CASHOUT') {
           // In crash, cashout diff is the full winAmount (bet * multiplier).
           // We need the original betAmount to reduce activeRealLiability.
           // Since we don't have it easily here, we can approximate: betAmount = winAmount / multiplier.
           const winAmount = diff;
           const betAmount = mult ? winAmount / mult : 0;
-          this.gameService.registerRealCashout(betAmount, winAmount);
+          await this.gameService.registerRealCashout(betAmount, winAmount);
         }
       } catch (err) {
         this.logger.error('Failed to save transaction ledger', err);

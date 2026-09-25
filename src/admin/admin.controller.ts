@@ -188,6 +188,16 @@ export class AdminController {
   }
 
   @UseGuards(AdminAuthGuard)
+  @Post('api/pool/set')
+  async setGlobalPool(@Body() body: { amount: number }) {
+    if (typeof body.amount !== 'number' || isNaN(body.amount) || body.amount < 0) {
+      throw new BadRequestException('Amount must be a non-negative number');
+    }
+    const updated = await this.adminService.setGlobalPool(body.amount);
+    return { success: true, globalPool: updated };
+  }
+
+  @UseGuards(AdminAuthGuard)
   @Get('api/deposits')
   async getDeposits(
     @Query('status') status?: string,

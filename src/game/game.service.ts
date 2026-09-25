@@ -1,5 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Server } from 'socket.io';
+import { RedisService } from '../redis/redis.service';
 
 export enum GameStatus {
   WAITING = 'waiting',
@@ -36,7 +37,7 @@ const BET_AMOUNTS = [
 ];
 
 @Injectable()
-export class GameService {
+export class GameService implements OnModuleInit {
   private readonly logger = new Logger(GameService.name);
   private server: Server;
   
@@ -52,9 +53,26 @@ export class GameService {
   private pendingRoundBots: LiveBet[] = [];
 
   // Company virtual pool variables
-  private globalPool: number = 10000;
+  private globalPool: number = 27215.92;
   private activeRealLiability: number = 0;
   private companyProfitMargin: number = 0.05; // 5%
+
+  constructor(private readonly redisService: RedisService) {}
+
+  async onModuleInit() {
+    try {
+      const savedPool = await this.redisService.get('game:global_pool');
+      if (savedPool !== null && savedPool !== undefined && !isNaN(parseFloat(savedPool))) {
+        this.globalPool = parseFloat(savedPool);
+        this.logger.log(`Initialized Global Pool from Redis: ${this.globalPool}`);
+      } else {
+        await this.redisService.set('game:global_pool', this.globalPool.toString());
+        this.logger.log(`Initialized Global Pool in Redis with default: ${this.globalPool}`);
+      }
+    } catch (err) {
+      this.logger.warn('Failed to load global pool from Redis', err);
+    }
+  }
 
   public setServer(server: Server) {
     this.server = server;
@@ -68,19 +86,39 @@ export class GameService {
     return this.globalPool;
   }
 
-  public registerRealBet(amount: number) {
-    if (this.status === GameStatus.WAITING) {
-      this.globalPool += amount * (1 - this.companyProfitMargin);
+  public async setGlobalPool(amount: number): Promise<number> {
+    this.globalPool = Math.max(0, parseFloat(amount.toFixed(2)));
+    try {
+      await this.redisService.set('game:global_pool', this.globalPool.toString());
+    } catch (err) {
+      this.logger.warn('Failed to persist global pool to Redis', err);
+    }
+    this.logger.log(`Global Pool updated manually to: ${this.globalPool}`);
+    return this.globalPool;
+  }
+
+  public async registerRealBet(amount: number) {
+    // 95% of real bet amount enters the liability buffer (5% house edge)
+    this.globalPool += amount * (1 - this.companyProfitMargin);
+    if (this.status === GameStatus.WAITING || this.status === GameStatus.PLAYING) {
       this.activeRealLiability += amount;
-      this.logger.log(`Real bet added: ${amount}. Pool: ${this.globalPool}, Liability: ${this.activeRealLiability}`);
+    }
+    this.logger.log(`Real bet added: ${amount}. Pool: ${this.globalPool.toFixed(2)}, Liability: ${this.activeRealLiability}`);
+    try {
+      await this.redisService.set('game:global_pool', this.globalPool.toFixed(2));
+    } catch (err) {
+      this.logger.warn('Failed to persist global pool to Redis', err);
     }
   }
 
-  public registerRealCashout(betAmount: number, winAmount: number) {
-    if (this.status === GameStatus.PLAYING) {
-      this.activeRealLiability -= betAmount;
-      this.globalPool -= winAmount;
-      this.logger.log(`Real cashout: Bet ${betAmount}, Win ${winAmount}. Pool: ${this.globalPool}, Liability: ${this.activeRealLiability}`);
+  public async registerRealCashout(betAmount: number, winAmount: number) {
+    this.activeRealLiability = Math.max(0, this.activeRealLiability - betAmount);
+    this.globalPool = Math.max(0, this.globalPool - winAmount);
+    this.logger.log(`Real cashout: Bet ${betAmount}, Win ${winAmount}. Pool: ${this.globalPool.toFixed(2)}, Liability: ${this.activeRealLiability}`);
+    try {
+      await this.redisService.set('game:global_pool', this.globalPool.toFixed(2));
+    } catch (err) {
+      this.logger.warn('Failed to persist global pool to Redis', err);
     }
   }
 

@@ -137,6 +137,11 @@ export class AdminService {
     
     const globalPool = this.gameService.getGlobalPool();
 
+    // Company Real Net Profit: Total approved deposits - Total paid withdrawals - Active player wallets
+    const companyNetProfit = parseFloat(
+      (totalDepositedAmount - totalWithdrawnAmount - totalSystemBalance).toFixed(2)
+    );
+
     return {
       totalUsers,
       pendingDeposits,
@@ -147,7 +152,12 @@ export class AdminService {
       totalWithdrawnAmount,
       totalSystemBalance,
       globalPool,
+      companyNetProfit,
     };
+  }
+
+  async setGlobalPool(amount: number): Promise<number> {
+    return this.gameService.setGlobalPool(amount);
   }
 
   async getDeposits(status?: string, limit: number = 50): Promise<DepositRequest[]> {
