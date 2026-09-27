@@ -142,8 +142,13 @@ BUILD_TS=$(date +%s)
 sed -i "s/main\.dart\.js/main.dart.js?v=$BUILD_TS/g" /var/www/skyrush/game_web/flutter_bootstrap.js
 sed -i "s/flutter_bootstrap\.js/flutter_bootstrap.js?v=$BUILD_TS/g" /var/www/skyrush/game_web/index.html
 
-# Configure Nginx Reverse Proxy with Virtual Hosts
+# Configure Nginx Reverse Proxy with Virtual Hosts & Security Hardening
 cat << 'EOF' > /etc/nginx/sites-available/default
+# ==========================================================
+# SKYRUSH PRODUCTION SECURITY HARDENED NGINX CONFIGURATION
+# ==========================================================
+server_tokens off;
+
 # 1. Frontend Web Game (skyrush.cc & www.skyrush.cc)
 server {
     listen 80;
@@ -153,14 +158,20 @@ server {
     root /var/www/skyrush/game_web;
     index index.html;
 
-    location / {
-        try_files $uri $uri/ /index.html;
-        add_header Cache-Control "no-cache, no-store, must-revalidate";
+    # Security Headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # Aggressive No-Cache for iOS Web Clip & PWA entry points
+    location ~* (index\.html|manifest\.json)$ {
+        add_header Cache-Control "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0";
+        expires -1;
     }
 
-    location ~* \.(?:manifest|appcache|html?|xml|json)$ {
-        add_header Cache-Control "no-cache, no-store, must-revalidate";
-        expires -1;
+    location / {
+        try_files $uri $uri/ /index.html;
     }
 
     location /socket.io/ {
@@ -190,6 +201,12 @@ server {
     listen [::]:80;
     server_name engine.skyrush.cc;
 
+    # Security Headers
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
@@ -211,6 +228,12 @@ server {
     listen [::]:80;
     server_name hq-ops-99.skyrush.cc;
 
+    # Security Headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
     location / {
         proxy_pass http://127.0.0.1:3001;
         proxy_http_version 1.1;
@@ -223,49 +246,24 @@ server {
     }
 }
 
-# 4. Fallback Default Server (Raw IP access: 94.136.190.213)
+# 4. Origin Shield & Port-Scan Drop (Catch-all for raw IP scans & unauthorized hosts)
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
+    server_tokens off;
 
-    root /var/www/skyrush/game_web;
-    index index.html;
-
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    location /socket.io/ {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-
-    location /auth/ {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-
-    location /admin/ {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
+    # Instantly drop direct IP scans, botnets, and unmapped Host headers
+    return 444;
 }
 EOF
 
 nginx -t
 systemctl restart nginx
+
+# Automated Daily Database & Redis Backups at 3:00 AM
+chmod +x /var/www/skyrush/server/backup.sh 2>/dev/null || true
+(crontab -l 2>/dev/null | grep -v "/var/www/skyrush/server/backup.sh" ; echo "0 3 * * * /var/www/skyrush/server/backup.sh >/dev/null 2>&1") | crontab -
 
 # Firewall Setup - Lock down raw backend ports to protect origin IP
 ufw allow OpenSSH
