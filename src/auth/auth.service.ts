@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, UnauthorizedException, Logger, Inject, forwardRef, OnModuleInit } from '@nestjs/common';
+import { Injectable, BadRequestException, UnauthorizedException, ConflictException, Logger, Inject, forwardRef, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike } from 'typeorm';
 import * as bcrypt from 'bcrypt';
@@ -416,71 +416,88 @@ export class AuthService implements OnModuleInit {
 
     const user = await this.validateUserFromToken(token);
 
-    const betKey = `active_bet:${user.id}:${betIndex}`;
-    const existingBet = await this.redisService.get(betKey);
-    if (existingBet) {
-      throw new BadRequestException(`Bet slot ${betIndex} already has an active bet for this round`);
+    // Phase 2: Distributed Atomic Mutex Lock
+    const lockKey = `lock:bet:${user.id}:${betIndex}`;
+    const acquired = await this.redisService.acquireLock(lockKey, 3);
+    if (!acquired) {
+      throw new ConflictException('A bet operation is already being processed for this slot');
     }
 
-    const currentBalance = Number(user.balance);
-    if (currentBalance < cleanAmount) {
-      throw new BadRequestException('Insufficient wallet balance');
-    }
-
-    // Authoritative balance deduction
-    const newBalance = parseFloat((currentBalance - cleanAmount).toFixed(2));
-    user.balance = newBalance;
-    const savedUser = await this.userRepository.save(user);
-
-    // Save transaction ledger
     try {
-      await this.transactionRepository.save({
-        userId: savedUser.id,
-        type: 'BET',
-        amount: cleanAmount,
-        currency: savedUser.currency || 'USD',
-        multiplier: null,
-        balanceAfter: newBalance,
+      const betKey = `active_bet:${user.id}:${betIndex}`;
+      const existingBet = await this.redisService.get(betKey);
+      if (existingBet) {
+        throw new BadRequestException(`Bet slot ${betIndex} already has an active bet for this round`);
+      }
+
+      // Phase 2: PostgreSQL ACID Transaction with Pessimistic Row Locking
+      let savedUser: User;
+      await this.userRepository.manager.transaction(async (manager) => {
+        const lockedUser = await manager.findOne(User, {
+          where: { id: user.id },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!lockedUser) {
+          throw new UnauthorizedException('User account not found');
+        }
+
+        const currentBalance = Number(lockedUser.balance);
+        if (currentBalance < cleanAmount) {
+          throw new BadRequestException('Insufficient wallet balance');
+        }
+
+        const newBalance = parseFloat((currentBalance - cleanAmount).toFixed(2));
+        lockedUser.balance = newBalance;
+        savedUser = await manager.save(lockedUser);
+
+        await manager.save(Transaction, {
+          userId: savedUser.id,
+          type: 'BET',
+          amount: cleanAmount,
+          currency: savedUser.currency || 'USD',
+          multiplier: null,
+          balanceAfter: newBalance,
+        });
       });
-    } catch (err) {
-      this.logger.error('Failed to save BET transaction ledger', err);
+
+      // Save active bet in Redis (180s TTL)
+      const betId = `real_${savedUser!.id}_${betIndex}_${Date.now()}`;
+      const betRecord = {
+        id: betId,
+        userId: savedUser!.id,
+        username: savedUser!.username,
+        betIndex,
+        amount: cleanAmount,
+        currency: savedUser!.currency || 'USD',
+        roundStartTime: this.gameService.getStartTime(),
+        placedAt: Date.now(),
+      };
+      await this.redisService.set(betKey, JSON.stringify(betRecord), 180);
+
+      // Register with GameService liability pool and live bets table
+      await this.gameService.registerRealBet(cleanAmount);
+      this.gameService.addRealUserBet({
+        id: betId,
+        name: savedUser!.username,
+        bet: cleanAmount,
+        targetMultiplier: 0,
+        cashedOut: false,
+      });
+
+      const sanitized = this.sanitizeUser(savedUser!);
+      try {
+        await this.redisService.set(`user:${savedUser!.username}`, JSON.stringify(sanitized));
+      } catch {}
+
+      return {
+        success: true,
+        balance: sanitized.balance,
+        bet: betRecord,
+        user: sanitized,
+      };
+    } finally {
+      await this.redisService.releaseLock(lockKey);
     }
-
-    // Save active bet in Redis (180s TTL)
-    const betId = `real_${savedUser.id}_${betIndex}_${Date.now()}`;
-    const betRecord = {
-      id: betId,
-      userId: savedUser.id,
-      username: savedUser.username,
-      betIndex,
-      amount: cleanAmount,
-      currency: savedUser.currency || 'USD',
-      roundStartTime: this.gameService.getStartTime(),
-      placedAt: Date.now(),
-    };
-    await this.redisService.set(betKey, JSON.stringify(betRecord), 180);
-
-    // Register with GameService liability pool and live bets table
-    await this.gameService.registerRealBet(cleanAmount);
-    this.gameService.addRealUserBet({
-      id: betId,
-      name: savedUser.username,
-      bet: cleanAmount,
-      targetMultiplier: 0,
-      cashedOut: false,
-    });
-
-    const sanitized = this.sanitizeUser(savedUser);
-    try {
-      await this.redisService.set(`user:${savedUser.username}`, JSON.stringify(sanitized));
-    } catch {}
-
-    return {
-      success: true,
-      balance: sanitized.balance,
-      bet: betRecord,
-      user: sanitized,
-    };
   }
 
   async cancelGameBet(token: string, betIndex: number) {
@@ -494,50 +511,67 @@ export class AuthService implements OnModuleInit {
 
     const user = await this.validateUserFromToken(token);
 
-    const betKey = `active_bet:${user.id}:${betIndex}`;
-    const raw = await this.redisService.get(betKey);
-    if (!raw) {
-      throw new BadRequestException('No active bet found in this slot to cancel');
+    // Phase 2: Distributed Atomic Mutex Lock
+    const lockKey = `lock:bet:${user.id}:${betIndex}`;
+    const acquired = await this.redisService.acquireLock(lockKey, 3);
+    if (!acquired) {
+      throw new ConflictException('A bet operation is already being processed for this slot');
     }
 
-    await this.redisService.del(betKey);
-    const betRecord = JSON.parse(raw);
-    const refundAmount = Number(betRecord.amount);
-
-    // Authoritative refund to user balance
-    const newBalance = parseFloat((Number(user.balance) + refundAmount).toFixed(2));
-    user.balance = newBalance;
-    const savedUser = await this.userRepository.save(user);
-
-    // Save transaction ledger
     try {
-      await this.transactionRepository.save({
-        userId: savedUser.id,
-        type: 'CANCEL_BET',
-        amount: refundAmount,
-        currency: savedUser.currency || 'USD',
-        multiplier: null,
-        balanceAfter: newBalance,
+      const betKey = `active_bet:${user.id}:${betIndex}`;
+      const raw = await this.redisService.get(betKey);
+      if (!raw) {
+        throw new BadRequestException('No active bet found in this slot to cancel');
+      }
+
+      await this.redisService.del(betKey);
+      const betRecord = JSON.parse(raw);
+      const refundAmount = Number(betRecord.amount);
+
+      // Phase 2: PostgreSQL ACID Transaction with Pessimistic Row Locking
+      let savedUser: User;
+      await this.userRepository.manager.transaction(async (manager) => {
+        const lockedUser = await manager.findOne(User, {
+          where: { id: user.id },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!lockedUser) {
+          throw new UnauthorizedException('User account not found');
+        }
+
+        const newBalance = parseFloat((Number(lockedUser.balance) + refundAmount).toFixed(2));
+        lockedUser.balance = newBalance;
+        savedUser = await manager.save(lockedUser);
+
+        await manager.save(Transaction, {
+          userId: savedUser.id,
+          type: 'CANCEL_BET',
+          amount: refundAmount,
+          currency: savedUser.currency || 'USD',
+          multiplier: null,
+          balanceAfter: newBalance,
+        });
       });
-    } catch (err) {
-      this.logger.error('Failed to save CANCEL_BET transaction ledger', err);
+
+      // Notify GameService
+      await this.gameService.cancelRealBet(refundAmount);
+      this.gameService.removeRealUserBet(betRecord.id);
+
+      const sanitized = this.sanitizeUser(savedUser!);
+      try {
+        await this.redisService.set(`user:${savedUser!.username}`, JSON.stringify(sanitized));
+      } catch {}
+
+      return {
+        success: true,
+        balance: sanitized.balance,
+        cancelledBetIndex: betIndex,
+        user: sanitized,
+      };
+    } finally {
+      await this.redisService.releaseLock(lockKey);
     }
-
-    // Notify GameService
-    await this.gameService.cancelRealBet(refundAmount);
-    this.gameService.removeRealUserBet(betRecord.id);
-
-    const sanitized = this.sanitizeUser(savedUser);
-    try {
-      await this.redisService.set(`user:${savedUser.username}`, JSON.stringify(sanitized));
-    } catch {}
-
-    return {
-      success: true,
-      balance: sanitized.balance,
-      cancelledBetIndex: betIndex,
-      user: sanitized,
-    };
   }
 
   async cashoutGameBet(token: string, betIndex: number) {
@@ -551,101 +585,113 @@ export class AuthService implements OnModuleInit {
 
     const user = await this.validateUserFromToken(token);
 
-    // Atomic fetch and delete to guarantee single-use cashout
-    const betKey = `active_bet:${user.id}:${betIndex}`;
-    const raw = await this.redisService.get(betKey);
-    if (!raw) {
-      throw new BadRequestException('No active bet found to cash out or already cashed out');
+    // Phase 2: Distributed Atomic Mutex Lock - Prevents parallel double-cashout
+    const lockKey = `lock:cashout:${user.id}:${betIndex}`;
+    const acquired = await this.redisService.acquireLock(lockKey, 3);
+    if (!acquired) {
+      throw new ConflictException('A cashout request is already being processed');
     }
-    await this.redisService.del(betKey);
 
-    const betRecord = JSON.parse(raw);
-    const betAmount = Number(betRecord.amount);
-
-    // Authoritative multiplier check
-    const currentMultiplier = parseFloat(this.gameService.getCurrentMultiplier().toFixed(2));
-    const crashPoint = this.gameService.getCrashPoint();
-
-    if (currentMultiplier >= crashPoint) {
-      // Plane crashed before or during the cashout attempt
-      try {
-        await this.betHistoryRepository.save({
-          userId: user.id,
-          betAmount,
-          cashOutMultiplier: null,
-          crashPoint,
-          winAmount: 0,
-          currency: user.currency || 'USD',
-        });
-        user.gamesPlayed = Number(user.gamesPlayed) + 1;
-        await this.userRepository.save(user);
-      } catch (err) {
-        this.logger.error('Failed to log lost bet during crash race', err);
+    try {
+      // Atomic fetch and delete to guarantee single-use cashout
+      const betKey = `active_bet:${user.id}:${betIndex}`;
+      const raw = await this.redisService.get(betKey);
+      if (!raw) {
+        throw new BadRequestException('No active bet found to cash out or already cashed out');
       }
-      throw new BadRequestException('Plane has already crashed!');
-    }
+      await this.redisService.del(betKey);
 
-    // Authoritative winning calculation
-    const winAmount = parseFloat((betAmount * currentMultiplier).toFixed(2));
-    const profit = parseFloat((winAmount - betAmount).toFixed(2));
+      const betRecord = JSON.parse(raw);
+      const betAmount = Number(betRecord.amount);
 
-    const newBalance = parseFloat((Number(user.balance) + winAmount).toFixed(2));
-    user.balance = newBalance;
-    user.gamesPlayed = Number(user.gamesPlayed) + 1;
-    if (profit > 0) {
-      user.totalWon = parseFloat((Number(user.totalWon) + profit).toFixed(2));
-    }
-    if (currentMultiplier > Number(user.bestMultiplier)) {
-      user.bestMultiplier = currentMultiplier;
-    }
+      // Authoritative multiplier check
+      const currentMultiplier = parseFloat(this.gameService.getCurrentMultiplier().toFixed(2));
+      const crashPoint = this.gameService.getCrashPoint();
 
-    const savedUser = await this.userRepository.save(user);
+      if (currentMultiplier >= crashPoint) {
+        // Plane crashed before or during the cashout attempt
+        try {
+          await this.betHistoryRepository.save({
+            userId: user.id,
+            betAmount,
+            cashOutMultiplier: null,
+            crashPoint,
+            winAmount: 0,
+            currency: user.currency || 'USD',
+          });
+          await this.userRepository.increment({ id: user.id }, 'gamesPlayed', 1);
+        } catch (err) {
+          this.logger.error('Failed to log lost bet during crash race', err);
+        }
+        throw new BadRequestException('Plane has already crashed!');
+      }
 
-    // Transaction ledger
-    try {
-      await this.transactionRepository.save({
-        userId: savedUser.id,
-        type: 'CASHOUT',
-        amount: winAmount,
-        currency: savedUser.currency || 'USD',
-        multiplier: currentMultiplier,
-        balanceAfter: newBalance,
+      // Authoritative winning calculation
+      const winAmount = parseFloat((betAmount * currentMultiplier).toFixed(2));
+      const profit = parseFloat((winAmount - betAmount).toFixed(2));
+
+      // Phase 2: PostgreSQL ACID Transaction with Pessimistic Row Locking
+      let savedUser: User;
+      await this.userRepository.manager.transaction(async (manager) => {
+        const lockedUser = await manager.findOne(User, {
+          where: { id: user.id },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!lockedUser) {
+          throw new UnauthorizedException('User account not found');
+        }
+
+        const newBalance = parseFloat((Number(lockedUser.balance) + winAmount).toFixed(2));
+        lockedUser.balance = newBalance;
+        lockedUser.gamesPlayed = Number(lockedUser.gamesPlayed) + 1;
+        if (profit > 0) {
+          lockedUser.totalWon = parseFloat((Number(lockedUser.totalWon) + profit).toFixed(2));
+        }
+        if (currentMultiplier > Number(lockedUser.bestMultiplier)) {
+          lockedUser.bestMultiplier = currentMultiplier;
+        }
+
+        savedUser = await manager.save(lockedUser);
+
+        await manager.save(Transaction, {
+          userId: savedUser.id,
+          type: 'CASHOUT',
+          amount: winAmount,
+          currency: savedUser.currency || 'USD',
+          multiplier: currentMultiplier,
+          balanceAfter: newBalance,
+        });
+
+        await manager.save(BetHistory, {
+          userId: savedUser.id,
+          betAmount,
+          cashOutMultiplier: currentMultiplier,
+          crashPoint,
+          winAmount,
+          currency: savedUser.currency || 'USD',
+        });
       });
-    } catch (err) {
-      this.logger.error('Failed to save CASHOUT transaction ledger', err);
-    }
 
-    // Bet History in PostgreSQL
-    try {
-      await this.betHistoryRepository.save({
-        userId: savedUser.id,
-        betAmount,
-        cashOutMultiplier: currentMultiplier,
-        crashPoint,
+      // Notify GameService liability pool & real cashout broadcast
+      await this.gameService.registerRealCashout(betAmount, winAmount);
+      this.gameService.markRealUserCashout(betRecord.id, currentMultiplier, winAmount);
+
+      const sanitized = this.sanitizeUser(savedUser!);
+      try {
+        await this.redisService.set(`user:${savedUser!.username}`, JSON.stringify(sanitized));
+      } catch {}
+
+      return {
+        success: true,
+        balance: sanitized.balance,
         winAmount,
-        currency: savedUser.currency || 'USD',
-      });
-    } catch (err) {
-      this.logger.error('Failed to save BetHistory record on cashout', err);
+        multiplier: currentMultiplier,
+        betIndex,
+        user: sanitized,
+      };
+    } finally {
+      await this.redisService.releaseLock(lockKey);
     }
-
-    // Notify GameService liability pool & real cashout broadcast
-    await this.gameService.registerRealCashout(betAmount, winAmount);
-    this.gameService.markRealUserCashout(betRecord.id, currentMultiplier, winAmount);
-
-    const sanitized = this.sanitizeUser(savedUser);
-    try {
-      await this.redisService.set(`user:${savedUser.username}`, JSON.stringify(sanitized));
-    } catch {}
-
-    return {
-      success: true,
-      balance: sanitized.balance,
-      winAmount,
-      multiplier: currentMultiplier,
-      betIndex,
-      user: sanitized,
-    };
   }
 
   async handleRoundCrashed(crashPoint: number) {
