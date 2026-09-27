@@ -15,7 +15,7 @@ git pull origin main
 echo "🔨 Building Flutter Web..."
 echo "SERVER_API_URL=https://engine.skyrush.cc" > .env
 /opt/flutter/bin/flutter config --no-analytics
-/opt/flutter/bin/flutter build web --release --no-wasm-dry-run
+/opt/flutter/bin/flutter build web --release --no-wasm-dry-run --no-tree-shake-icons
 
 echo "🚀 Deploying to Nginx web directory with Cache-Busting..."
 mkdir -p /var/www/skyrush/game_web

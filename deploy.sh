@@ -130,7 +130,7 @@ git config --global --add safe.directory /opt/flutter
 cd /var/www/skyrush/game_app
 echo "SERVER_API_URL=https://engine.skyrush.cc" > .env
 /opt/flutter/bin/flutter config --no-analytics
-/opt/flutter/bin/flutter build web --release --no-wasm-dry-run
+/opt/flutter/bin/flutter build web --release --no-wasm-dry-run --no-tree-shake-icons
 
 mkdir -p /var/www/skyrush/game_web
 rm -rf /var/www/skyrush/game_web/*
