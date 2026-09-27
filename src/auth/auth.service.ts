@@ -533,6 +533,102 @@ export class AuthService {
     return count > 0;
   }
 
+  private async sendPasswordResetEmail(toEmail: string, otp: string): Promise<boolean> {
+    const apiKey = process.env.RESEND_API_KEY;
+    const from = process.env.EMAIL_FROM || 'SkyRush Security <noreply@skyrush.cc>';
+
+    if (!apiKey) {
+      this.logger.warn('RESEND_API_KEY is not configured in .env. Email dispatch skipped.');
+      return false;
+    }
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SkyRush Verification Code</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #07090E; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #F1F5F9;">
+  <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #07090E; padding: 40px 20px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="max-width: 500px; background: linear-gradient(180deg, #0F172A 0%, #0B0F19 100%); border: 1px solid #1E293B; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);">
+          <tr>
+            <td align="center" style="padding: 32px 30px 20px 30px; border-bottom: 1px solid #1E293B; background: radial-gradient(circle at top, rgba(56, 189, 248, 0.12) 0%, transparent 70%);">
+              <h1 style="margin: 0; font-size: 26px; font-weight: 800; letter-spacing: 2px; color: #38BDF8; text-transform: uppercase;">
+                SKYRUSH
+              </h1>
+              <p style="margin: 6px 0 0 0; font-size: 13px; color: #94A3B8; letter-spacing: 0.5px;">SECURITY &amp; VERIFICATION</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 32px 30px 24px 30px;">
+              <h2 style="margin: 0 0 12px 0; font-size: 18px; font-weight: 600; color: #F8FAFC;">Password Reset Request</h2>
+              <p style="margin: 0 0 24px 0; font-size: 14px; line-height: 1.6; color: #94A3B8;">
+                We received a request to reset the password for your <strong style="color: #F8FAFC;">SkyRush</strong> account. Use the 6-digit verification code below to proceed:
+              </p>
+              <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="margin: 20px 0;">
+                <tr>
+                  <td align="center" style="background: #090D16; border: 2px dashed #0284C7; border-radius: 12px; padding: 20px 10px;">
+                    <div style="font-size: 38px; font-weight: 800; letter-spacing: 10px; color: #38BDF8; font-family: 'Courier New', Courier, monospace; text-shadow: 0 0 12px rgba(56, 189, 248, 0.4);">
+                      ${otp}
+                    </div>
+                    <div style="margin-top: 8px; font-size: 12px; color: #64748B; font-weight: 500;">
+                      VALID FOR 5 MINUTES
+                    </div>
+                  </td>
+                </tr>
+              </table>
+              <p style="margin: 24px 0 0 0; font-size: 13px; line-height: 1.6; color: #64748B;">
+                🔒 If you did not make this request, you can safely ignore this email. Your account remains completely secure. Never share this code with anyone.
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td align="center" style="padding: 20px 30px; background-color: #080C14; border-top: 1px solid #1E293B;">
+              <p style="margin: 0; font-size: 12px; color: #475569;">
+                &copy; 2026 <a href="https://skyrush.cc" style="color: #38BDF8; text-decoration: none; font-weight: 600;">SkyRush</a>. All rights reserved.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+    try {
+      const response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from,
+          to: [toEmail],
+          subject: `SkyRush Verification Code: ${otp}`,
+          html,
+        }),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        this.logger.error(`Resend API error sending email to ${toEmail}: ${errText}`);
+        return false;
+      }
+
+      const resData: any = await response.json();
+      this.logger.log(`📧 Password reset email delivered to ${toEmail} via Resend (ID: ${resData?.id})`);
+      return true;
+    } catch (err) {
+      this.logger.error(`Exception while dispatching email via Resend to ${toEmail}:`, err);
+      return false;
+    }
+  }
+
   async requestPasswordResetOtp(identifier: string): Promise<{ success: boolean; message: string; devOtp?: string }> {
     const clean = identifier?.trim().replace(/\s+/g, '');
     if (!clean || clean.length < 3) {
@@ -566,13 +662,24 @@ export class AuthService {
       this.logger.warn('Failed to store OTP in Redis', err);
     }
 
-    const target = user.email || user.phoneNumber || user.username;
-    this.logger.log(`🔑 Password reset OTP for ${target}: [ ${otp} ]`);
+    const targetEmail = (user.email && user.email.includes('@')) ? user.email : (clean.includes('@') ? clean : null);
+
+    let emailSent = false;
+    if (targetEmail) {
+      emailSent = await this.sendPasswordResetEmail(targetEmail, otp);
+    }
+
+    const target = targetEmail || user.phoneNumber || user.username;
+    this.logger.log(`🔑 Password reset OTP for ${target}: [ ${otp} ] (Email sent: ${emailSent})`);
+
+    const isProduction = process.env.NODE_ENV === 'production';
 
     return {
       success: true,
-      message: `Verification code sent to ${target}`,
-      devOtp: otp,
+      message: targetEmail
+        ? (emailSent ? `Verification code sent to ${targetEmail}!` : `Verification code generated for ${targetEmail}.`)
+        : `Verification code sent to ${target}`,
+      ...(!isProduction && !emailSent ? { devOtp: otp } : {}),
     };
   }
 

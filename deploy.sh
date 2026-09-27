@@ -76,6 +76,7 @@ fi
 echo "🚀 [6/8] Building and Launching NestJS Backend..."
 cd /var/www/skyrush/server
 
+if [ ! -f .env ]; then
 cat << 'EOF' > .env
 PORT=3000
 REDIS_HOST=localhost
@@ -91,6 +92,7 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=admin123
 ADMIN_JWT_SECRET=supersecretadminjwt_prod_key_2026
 EOF
+fi
 
 npm install --production=false
 npm run build
