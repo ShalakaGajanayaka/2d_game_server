@@ -2,7 +2,7 @@
 set -e
 
 echo "=========================================================="
-echo "🚀 SKYRUSH AVIATOR 2D - PRODUCTION GITHUB AUTO-DEPLOYMENT"
+echo "🚀 SKYRUSH 2D - PRODUCTION GITHUB AUTO-DEPLOYMENT"
 echo "=========================================================="
 
 # 1. Update system packages
@@ -263,9 +263,9 @@ ufw delete allow 3001/tcp 2>/dev/null || true
 echo "y" | ufw enable || true
 
 echo "=========================================================="
-echo "🎉 DEPLOYMENT SUCCESSFUL! SKYRUSH AVIATOR IS NOW LIVE! 🎉"
+echo "🎉 DEPLOYMENT SUCCESSFUL! SKYRUSH 2D IS NOW LIVE! 🎉"
 echo "=========================================================="
-echo "🎮 Aviator Game (Web):     https://skyrush.cc"
+echo "🎮 SkyRush Game (Web):     https://skyrush.cc"
 echo "⚡ Realtime Game Engine:   https://engine.skyrush.cc"
 echo "📊 Secret Admin Control:   https://hq-ops-99.skyrush.cc"
 echo "=========================================================="
