@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { RedisModule } from './redis/redis.module';
@@ -31,12 +33,35 @@ import { PoolAuditLog } from './auth/entities/pool-audit-log.entity';
         synchronize: true, // Auto-create tables in PostgreSQL
       }),
     }),
+    ThrottlerModule.forRoot([
+      {
+        name: 'short',
+        ttl: 1000,
+        limit: 15, // max 15 requests per second
+      },
+      {
+        name: 'medium',
+        ttl: 10000,
+        limit: 60, // max 60 requests per 10 seconds
+      },
+      {
+        name: 'long',
+        ttl: 60000,
+        limit: 150, // max 150 requests per minute
+      },
+    ]),
     RedisModule,
     GameModule,
     AuthModule,
     AdminModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
+  ],
 })
 export class AppModule {}

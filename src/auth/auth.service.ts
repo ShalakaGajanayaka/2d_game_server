@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, UnauthorizedException, ConflictException, Logger, Inject, forwardRef, OnModuleInit } from '@nestjs/common';
+import { Injectable, BadRequestException, UnauthorizedException, ConflictException, HttpException, HttpStatus, Logger, Inject, forwardRef, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike } from 'typeorm';
 import * as bcrypt from 'bcrypt';
@@ -278,6 +278,17 @@ export class AuthService implements OnModuleInit {
       throw new BadRequestException('Email/Username and password are required');
     }
 
+    // Phase 3: Brute-Force Login Rate Limiting (5 failed attempts / 5 minutes cooldown)
+    const attemptsKey = `failed_login:${clean.toLowerCase()}`;
+    const rawAttempts = await this.redisService.get(attemptsKey);
+    const attempts = rawAttempts ? parseInt(rawAttempts, 10) : 0;
+    if (attempts >= 5) {
+      throw new HttpException(
+        'Account temporarily locked due to 5 consecutive failed login attempts. Please wait 5 minutes before trying again.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
     const whereConditions: any[] = [
       { email: ILike(clean) },
       { username: ILike(clean) },
@@ -297,7 +308,14 @@ export class AuthService implements OnModuleInit {
       where: whereConditions,
     });
     if (!user) {
-      throw new UnauthorizedException('Invalid email, username, or password');
+      const newAttempts = attempts + 1;
+      await this.redisService.set(attemptsKey, newAttempts.toString(), 300);
+      const remaining = 5 - newAttempts;
+      throw new UnauthorizedException(
+        remaining > 0
+          ? `Invalid credentials. (${remaining} attempts remaining before temporary lockout)`
+          : 'Invalid credentials. Account temporarily locked for 5 minutes.',
+      );
     }
 
     let isMatch = false;
@@ -317,7 +335,19 @@ export class AuthService implements OnModuleInit {
     }
 
     if (!isMatch) {
-      throw new UnauthorizedException('Invalid email, username, or password');
+      const newAttempts = attempts + 1;
+      await this.redisService.set(attemptsKey, newAttempts.toString(), 300);
+      const remaining = 5 - newAttempts;
+      throw new UnauthorizedException(
+        remaining > 0
+          ? `Invalid credentials. (${remaining} attempts remaining before temporary lockout)`
+          : 'Invalid credentials. Account temporarily locked for 5 minutes.',
+      );
+    }
+
+    // Reset failed login attempts on successful authentication
+    if (attempts > 0) {
+      await this.redisService.del(attemptsKey);
     }
 
     const token = this.generateToken();
@@ -904,6 +934,26 @@ export class AuthService implements OnModuleInit {
       throw new BadRequestException('Please enter a valid email or mobile number');
     }
 
+    // Phase 3: Strict OTP Quota Protection & Anti-Spam (Max 3 OTPs / 10 mins, 60s cooldown)
+    const cooldownKey = `otp_cooldown:${clean.toLowerCase()}`;
+    const inCooldown = await this.redisService.get(cooldownKey);
+    if (inCooldown) {
+      throw new HttpException(
+        'Please wait 60 seconds before requesting another verification code.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
+    const countKey = `otp_rate:${clean.toLowerCase()}`;
+    const rawCount = await this.redisService.get(countKey);
+    const count = rawCount ? parseInt(rawCount, 10) : 0;
+    if (count >= 3) {
+      throw new HttpException(
+        'Maximum verification code requests exceeded. Please try again after 10 minutes.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
     const whereConditions: any[] = [
       { email: ILike(clean) },
       { username: ILike(clean) },
@@ -927,6 +977,10 @@ export class AuthService implements OnModuleInit {
       if (user.phoneNumber) {
         await this.redisService.set(`otp:${user.phoneNumber}`, otp, 300);
       }
+
+      // Record rate limit and set 60s cooldown to protect Resend quota
+      await this.redisService.set(countKey, (count + 1).toString(), 600);
+      await this.redisService.set(cooldownKey, '1', 60);
     } catch (err) {
       this.logger.warn('Failed to store OTP in Redis', err);
     }

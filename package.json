@@ -25,6 +25,7 @@
     "@nestjs/core": "^11.0.1",
     "@nestjs/platform-express": "^11.0.1",
     "@nestjs/platform-socket.io": "^11.1.24",
+    "@nestjs/throttler": "^6.7.1",
     "@nestjs/typeorm": "^12.0.1",
     "@nestjs/websockets": "^11.1.24",
     "@types/bcrypt": "^6.0.0",
