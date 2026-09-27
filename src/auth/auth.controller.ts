@@ -71,6 +71,43 @@ export class AuthController {
     return this.authService.renameUser(token, newUsername.trim());
   }
 
+  private extractToken(authHeader?: string, bodyToken?: string): string {
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      return authHeader.replace('Bearer ', '').trim();
+    }
+    if (bodyToken && typeof bodyToken === 'string' && bodyToken.trim()) {
+      return bodyToken.trim();
+    }
+    throw new UnauthorizedException('Authentication token required');
+  }
+
+  @Post('game-bet')
+  async placeGameBet(
+    @Headers('authorization') authHeader: string,
+    @Body() body: { token?: string; betIndex: number; amount: number },
+  ) {
+    const token = this.extractToken(authHeader, body?.token);
+    return this.authService.placeGameBet(token, Number(body.betIndex), Number(body.amount));
+  }
+
+  @Post('game-cancel-bet')
+  async cancelGameBet(
+    @Headers('authorization') authHeader: string,
+    @Body() body: { token?: string; betIndex: number },
+  ) {
+    const token = this.extractToken(authHeader, body?.token);
+    return this.authService.cancelGameBet(token, Number(body.betIndex));
+  }
+
+  @Post('game-cashout')
+  async cashoutGameBet(
+    @Headers('authorization') authHeader: string,
+    @Body() body: { token?: string; betIndex: number },
+  ) {
+    const token = this.extractToken(authHeader, body?.token);
+    return this.authService.cashoutGameBet(token, Number(body.betIndex));
+  }
+
   @Post('update-balance')
   async updateBalance(
     @Body() body: { token: string; balance: number; winDelta?: number; mult?: number },

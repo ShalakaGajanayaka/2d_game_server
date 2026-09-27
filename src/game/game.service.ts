@@ -57,6 +57,8 @@ export class GameService implements OnModuleInit {
   private activeRealLiability: number = 0;
   private companyProfitMargin: number = 0.05; // 5%
 
+  private crashCallbacks: Array<(crashPoint: number) => void> = [];
+
   constructor(private readonly redisService: RedisService) {}
 
   async onModuleInit() {
@@ -145,6 +147,66 @@ export class GameService implements OnModuleInit {
     } catch (err) {
       this.logger.warn('Failed to persist global pool to Redis', err);
     }
+  }
+
+  public async cancelRealBet(amount: number) {
+    this.globalPool = Math.max(0, this.globalPool - amount * (1 - this.companyProfitMargin));
+    this.activeRealLiability = Math.max(0, this.activeRealLiability - amount);
+    this.logger.log(`Real bet cancelled: ${amount}. Pool: ${this.globalPool.toFixed(2)}, Liability: ${this.activeRealLiability}`);
+    try {
+      await this.redisService.set('game:global_pool', this.globalPool.toFixed(2));
+    } catch (err) {
+      this.logger.warn('Failed to persist global pool to Redis', err);
+    }
+  }
+
+  public getStatus(): GameStatus {
+    return this.status;
+  }
+
+  public getCurrentMultiplier(): number {
+    return this.currentMultiplier;
+  }
+
+  public getCrashPoint(): number {
+    return this.crashPoint;
+  }
+
+  public getStartTime(): number {
+    return this.startTime;
+  }
+
+  public addRealUserBet(bet: LiveBet) {
+    this.currentRoundBets.unshift(bet);
+    if (this.server) {
+      this.server.emit('newLiveBet', bet);
+    }
+  }
+
+  public removeRealUserBet(betId: string) {
+    this.currentRoundBets = this.currentRoundBets.filter(b => b.id !== betId);
+    if (this.server) {
+      this.server.emit('betCancelled', { id: betId });
+    }
+  }
+
+  public markRealUserCashout(betId: string, multiplier: number, winAmount: number) {
+    const bet = this.currentRoundBets.find(b => b.id === betId);
+    if (bet) {
+      bet.cashedOut = true;
+      bet.cashedOutMultiplier = multiplier;
+    }
+    if (this.server) {
+      this.server.emit('betCashedOut', {
+        id: betId,
+        multiplier,
+        winAmount,
+      });
+    }
+  }
+
+  public registerCrashCallback(cb: (crashPoint: number) => void) {
+    this.crashCallbacks.push(cb);
   }
 
   private generateUniqueName(index: number): string {
@@ -337,6 +399,15 @@ export class GameService implements OnModuleInit {
     
     this.logger.log(`Crashed at ${this.crashPoint}`);
     this.broadcastState();
+
+    // Trigger crash callbacks for authoritative round settlement
+    for (const cb of this.crashCallbacks) {
+      try {
+        cb(this.crashPoint);
+      } catch (err) {
+        this.logger.error('Error executing crash callback', err);
+      }
+    }
 
     // Wait 3 seconds before next round
     setTimeout(() => {
