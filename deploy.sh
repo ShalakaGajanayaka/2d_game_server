@@ -136,6 +136,10 @@ mkdir -p /var/www/skyrush/game_web
 rm -rf /var/www/skyrush/game_web/*
 cp -rf build/web/* /var/www/skyrush/game_web/
 
+BUILD_TS=$(date +%s)
+sed -i "s/main\.dart\.js/main.dart.js?v=$BUILD_TS/g" /var/www/skyrush/game_web/flutter_bootstrap.js
+sed -i "s/flutter_bootstrap\.js/flutter_bootstrap.js?v=$BUILD_TS/g" /var/www/skyrush/game_web/index.html
+
 # Configure Nginx Reverse Proxy with Virtual Hosts
 cat << 'EOF' > /etc/nginx/sites-available/default
 # 1. Frontend Web Game (skyrush.cc & www.skyrush.cc)

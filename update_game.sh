@@ -17,10 +17,14 @@ echo "SERVER_API_URL=https://engine.skyrush.cc" > .env
 /opt/flutter/bin/flutter config --no-analytics
 /opt/flutter/bin/flutter build web --release --no-wasm-dry-run
 
-echo "🚀 Deploying to Nginx web directory..."
+echo "🚀 Deploying to Nginx web directory with Cache-Busting..."
 mkdir -p /var/www/skyrush/game_web
 rm -rf /var/www/skyrush/game_web/*
 cp -rf build/web/* /var/www/skyrush/game_web/
+
+BUILD_TS=$(date +%s)
+sed -i "s/main\.dart\.js/main.dart.js?v=$BUILD_TS/g" /var/www/skyrush/game_web/flutter_bootstrap.js
+sed -i "s/flutter_bootstrap\.js/flutter_bootstrap.js?v=$BUILD_TS/g" /var/www/skyrush/game_web/index.html
 
 systemctl restart nginx
 
