@@ -133,6 +133,7 @@ echo "SERVER_API_URL=https://engine.skyrush.cc" > .env
 /opt/flutter/bin/flutter build web --release --no-wasm-dry-run
 
 mkdir -p /var/www/skyrush/game_web
+rm -rf /var/www/skyrush/game_web/*
 cp -rf build/web/* /var/www/skyrush/game_web/
 
 # Configure Nginx Reverse Proxy with Virtual Hosts
@@ -148,6 +149,12 @@ server {
 
     location / {
         try_files $uri $uri/ /index.html;
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+    }
+
+    location ~* \.(?:manifest|appcache|html?|xml|json)$ {
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        expires -1;
     }
 
     location /socket.io/ {
