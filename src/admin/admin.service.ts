@@ -18,6 +18,7 @@ export interface PaymentChannel {
   accountName: string;
   instructions: string;
   iconName: string;
+  isEnabled?: boolean;
 }
 
 @Injectable()
@@ -62,30 +63,33 @@ export class AdminService implements OnModuleInit {
         name: 'iPay (Sri Lanka)',
         type: 'ipay',
         badge: 'Instant QR / App',
-        accountNumber: 'IPAY-784210',
-        accountName: 'SkyRush Entertainment LK',
-        instructions: 'Open your iPay app, choose Pay Merchant, enter Merchant ID IPAY-784210, include your Gamer Tag as remark, and submit the iPay Reference Number below.',
+        accountNumber: '0729642306',
+        accountName: 'SkyRush Official',
+        instructions: 'Open your iPay app, choose Pay Merchant / Send Money, enter Mobile / Account 0729642306, include your Gamer Tag as remark, and submit the iPay Reference Number below.',
         iconName: 'qr_code_scanner',
+        isEnabled: true,
       },
       {
         id: 'upay',
         name: 'UPay (Sri Lanka)',
         type: 'upay',
         badge: 'Mobile Transfer',
-        accountNumber: '077 123 4567',
-        accountName: 'SkyRush Official UPay',
-        instructions: 'Open your UPay app, send money to mobile number 0771234567 with your Gamer Tag in description, and copy the transaction reference number below.',
+        accountNumber: '0729642306',
+        accountName: 'SkyRush Official',
+        instructions: 'Open your UPay app, send money to mobile number 0729642306 with your Gamer Tag in description, and copy the transaction reference number below.',
         iconName: 'phone_android',
+        isEnabled: true,
       },
       {
         id: 'bank_transfer',
-        name: 'Commercial Bank of Ceylon',
+        name: 'Commercial Bank',
         type: 'bank_transfer',
-        badge: 'Direct Bank / CDM',
-        accountNumber: '1000 2489 3104',
-        accountName: 'SkyRush Interactive LK (Pvt) Ltd',
-        instructions: 'Transfer via online banking or CDM. Bank: Commercial Bank, Kollupitiya Branch. Enter your Gamer Tag in the transfer remark and submit the deposit reference.',
+        badge: 'Disabled',
+        accountNumber: 'Disabled',
+        accountName: 'Commercial Bank',
+        instructions: 'Commercial Bank deposits are temporarily disabled. Please use iPay or UPay.',
         iconName: 'account_balance',
+        isEnabled: false,
       },
     ];
   }
@@ -99,6 +103,10 @@ export class AdminService implements OnModuleInit {
     paymentMethod: string,
     referenceNumber: string,
   ): Promise<DepositRequest> {
+    if (paymentMethod === 'bank_transfer') {
+      throw new BadRequestException('Commercial Bank deposits are temporarily disabled. Please use iPay or UPay.');
+    }
+
     const cleanAmount = Number(amount);
     if (!cleanAmount || cleanAmount <= 0) {
       throw new BadRequestException('Deposit amount must be greater than zero');
