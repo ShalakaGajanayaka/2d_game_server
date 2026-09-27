@@ -35,6 +35,18 @@ export class User {
   @Column({ type: 'jsonb', nullable: true })
   savedWithdrawalDetails: any;
 
+  @Column({ default: false })
+  isFrozen: boolean;
+
+  @Column({ nullable: true })
+  freezeReason: string;
+
+  @Column({ default: false })
+  isFlaggedForReview: boolean;
+
+  @Column({ nullable: true })
+  flaggedReason: string;
+
   @CreateDateColumn()
   createdAt: Date;
 

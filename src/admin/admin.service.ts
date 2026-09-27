@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike } from 'typeorm';
 import { User } from '../auth/entities/user.entity';
@@ -21,7 +21,7 @@ export interface PaymentChannel {
 }
 
 @Injectable()
-export class AdminService {
+export class AdminService implements OnModuleInit {
   private readonly logger = new Logger(AdminService.name);
 
   constructor(
@@ -38,6 +38,22 @@ export class AdminService {
     private readonly redisService: RedisService,
     private readonly gameService: GameService,
   ) {}
+
+  onModuleInit() {
+    // Phase 4: Initial reconciliation check after server startup
+    setTimeout(() => {
+      this.runFullSystemReconciliation().catch((err) => {
+        this.logger.error('Error during initial system ledger reconciliation', err);
+      });
+    }, 15000);
+
+    // Schedule automated periodic reconciliation every 60 minutes
+    setInterval(() => {
+      this.runFullSystemReconciliation().catch((err) => {
+        this.logger.error('Error during scheduled system ledger reconciliation', err);
+      });
+    }, 60 * 60 * 1000);
+  }
 
   getPaymentChannels(): PaymentChannel[] {
     return [
@@ -717,4 +733,210 @@ export class AdminService {
       withdrawals,
     };
   }
+
+  // -------------------------------------------------------------
+  // PHASE 4: FINANCIAL LEDGER INTEGRITY & ANTI-FRAUD ENGINE
+  // -------------------------------------------------------------
+
+  async reconcileUserLedger(userId: string) {
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const txs = await this.transactionRepo.find({
+      where: { userId },
+      order: { createdAt: 'ASC' },
+    });
+
+    let calculatedBalance = 0;
+    let totalDeposits = 0;
+    let totalWithdrawals = 0;
+    let totalWins = 0;
+    let totalBets = 0;
+
+    for (const tx of txs) {
+      const amt = Number(tx.amount);
+      if (['DEPOSIT', 'MANUAL_CREDIT'].includes(tx.type)) {
+        calculatedBalance += amt;
+        totalDeposits += amt;
+      } else if (['CASHOUT', 'CANCEL_BET', 'BONUS'].includes(tx.type)) {
+        calculatedBalance += amt;
+        totalWins += amt;
+      } else if (tx.type === 'BET') {
+        calculatedBalance -= amt;
+        totalBets += amt;
+      } else if (tx.type === 'WITHDRAWAL') {
+        calculatedBalance -= amt;
+        totalWithdrawals += amt;
+      }
+    }
+
+    calculatedBalance = parseFloat(calculatedBalance.toFixed(2));
+    const currentBalance = Number(user.balance);
+    const variance = parseFloat(Math.abs(currentBalance - calculatedBalance).toFixed(2));
+    const isClean = variance <= 0.05;
+
+    if (!isClean && !user.isFrozen) {
+      user.isFrozen = true;
+      user.freezeReason = `Automated Security Audit: Ledger variance of LKR ${variance.toFixed(2)} detected (Balance: ${currentBalance}, Ledger: ${calculatedBalance})`;
+      user.isFlaggedForReview = true;
+      user.flaggedReason = `Ledger discrepancy: LKR ${variance.toFixed(2)}`;
+      await this.userRepo.save(user);
+      this.logger.error(`🚨 FRAUD ALARM: User ${user.username} frozen! Balance: ${currentBalance}, Ledger: ${calculatedBalance}, Variance: ${variance}`);
+    }
+
+    return {
+      userId: user.id,
+      username: user.username,
+      currentBalance,
+      calculatedBalance,
+      variance,
+      isClean,
+      isFrozen: user.isFrozen,
+      freezeReason: user.freezeReason,
+      totalDeposits: parseFloat(totalDeposits.toFixed(2)),
+      totalWithdrawals: parseFloat(totalWithdrawals.toFixed(2)),
+      totalBets: parseFloat(totalBets.toFixed(2)),
+      totalWins: parseFloat(totalWins.toFixed(2)),
+      transactionCount: txs.length,
+    };
+  }
+
+  async runFullSystemReconciliation() {
+    this.logger.log('🔍 Starting system-wide financial ledger reconciliation...');
+    const users = await this.userRepo.find();
+    let reconciledCount = 0;
+    let flaggedCount = 0;
+    const discrepancies: any[] = [];
+
+    for (const user of users) {
+      try {
+        const result = await this.reconcileUserLedger(user.id);
+        if (result.isClean) {
+          reconciledCount++;
+        } else {
+          flaggedCount++;
+          discrepancies.push(result);
+        }
+      } catch (err) {
+        this.logger.error(`Failed to reconcile user ${user.id}`, err);
+      }
+    }
+
+    this.logger.log(`✅ Reconciliation finished: ${reconciledCount} passed, ${flaggedCount} flagged out of ${users.length} total users.`);
+
+    return {
+      totalUsersChecked: users.length,
+      reconciledCount,
+      flaggedCount,
+      discrepancies,
+      auditedAt: new Date().toISOString(),
+    };
+  }
+
+  async getFraudAlerts() {
+    const users = await this.userRepo.find({
+      order: { createdAt: 'DESC' },
+    });
+
+    const alerts: any[] = [];
+
+    // 1. Check for frozen or flagged accounts
+    for (const user of users) {
+      if (user.isFrozen || user.isFlaggedForReview) {
+        alerts.push({
+          type: 'ACCOUNT_FROZEN_OR_FLAGGED',
+          severity: 'HIGH',
+          userId: user.id,
+          username: user.username,
+          currency: user.currency,
+          balance: Number(user.balance),
+          reason: user.freezeReason || user.flaggedReason || 'Account under review',
+          createdAt: user.createdAt,
+        });
+      }
+    }
+
+    // 2. Sybil / Multi-account detection: users sharing same withdrawal account
+    const accountMap = new Map<string, string[]>();
+    for (const user of users) {
+      if (user.savedWithdrawalDetails?.accountNumber) {
+        const accNum = String(user.savedWithdrawalDetails.accountNumber).trim();
+        if (accNum.length > 4) {
+          if (!accountMap.has(accNum)) {
+            accountMap.set(accNum, []);
+          }
+          accountMap.get(accNum)!.push(user.username);
+        }
+      }
+    }
+
+    for (const [accNum, usernames] of accountMap.entries()) {
+      if (usernames.length > 1) {
+        alerts.push({
+          type: 'SHARED_BANK_ACCOUNT',
+          severity: 'CRITICAL',
+          details: `Bank account/phone "${accNum}" is shared by ${usernames.length} different users: [${usernames.join(', ')}]`,
+          usernames,
+        });
+      }
+    }
+
+    // 3. Statistical win anomaly detection
+    for (const user of users) {
+      const games = Number(user.gamesPlayed);
+      const won = Number(user.totalWon);
+      const balance = Number(user.balance);
+
+      if (games >= 5 && won > 50000 && balance > 50000) {
+        alerts.push({
+          type: 'HIGH_ROLLER_WIN_STREAK',
+          severity: 'MEDIUM',
+          userId: user.id,
+          username: user.username,
+          details: `Player won ${won} across ${games} games. Best multiplier: ${user.bestMultiplier}x.`,
+        });
+      }
+    }
+
+    return {
+      alerts,
+      totalAlerts: alerts.length,
+      auditedAt: new Date().toISOString(),
+    };
+  }
+
+  async freezeUser(userId: string, reason: string, adminUser: string = 'Admin') {
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    user.isFrozen = true;
+    user.freezeReason = reason || 'Suspended by Administrator';
+    user.isFlaggedForReview = true;
+    const saved = await this.userRepo.save(user);
+
+    try {
+      await this.redisService.del(`token:*`);
+      await this.redisService.del(`user:${user.username.toLowerCase()}`);
+    } catch {}
+
+    this.logger.warn(`User ${user.username} frozen by ${adminUser}: ${reason}`);
+    return saved;
+  }
+
+  async unfreezeUser(userId: string, adminUser: string = 'Admin') {
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    user.isFrozen = false;
+    user.freezeReason = null as any;
+    user.isFlaggedForReview = false;
+    user.flaggedReason = null as any;
+    const saved = await this.userRepo.save(user);
+
+    this.logger.log(`User ${user.username} unfrozen by ${adminUser}`);
+    return saved;
+  }
 }
+

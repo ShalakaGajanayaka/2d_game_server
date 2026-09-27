@@ -98,6 +98,10 @@ export interface UserProfile {
   bestMultiplier: number;
   createdAt: number;
   savedWithdrawalDetails?: any;
+  isFrozen?: boolean;
+  freezeReason?: string;
+  isFlaggedForReview?: boolean;
+  flaggedReason?: string;
 }
 
 @Injectable()
@@ -185,6 +189,10 @@ export class AuthService implements OnModuleInit {
       bestMultiplier: Number(user.bestMultiplier),
       createdAt: user.createdAt ? new Date(user.createdAt).getTime() : Date.now(),
       savedWithdrawalDetails: user.savedWithdrawalDetails,
+      isFrozen: !!user.isFrozen,
+      freezeReason: user.freezeReason || undefined,
+      isFlaggedForReview: !!user.isFlaggedForReview,
+      flaggedReason: user.flaggedReason || undefined,
     };
   }
 
@@ -350,6 +358,12 @@ export class AuthService implements OnModuleInit {
       await this.redisService.del(attemptsKey);
     }
 
+    if (user.isFrozen) {
+      throw new UnauthorizedException(
+        `Account is temporarily suspended: ${user.freezeReason || 'Under security audit'}. Please contact support.`,
+      );
+    }
+
     const token = this.generateToken();
 
     try {
@@ -427,6 +441,9 @@ export class AuthService implements OnModuleInit {
     const user = await this.userRepository.findOne({ where: { username } });
     if (!user) {
       throw new UnauthorizedException('User account not found');
+    }
+    if (user.isFrozen) {
+      throw new UnauthorizedException(`Account is temporarily suspended: ${user.freezeReason || 'Under security audit'}. Please contact support.`);
     }
     return user;
   }

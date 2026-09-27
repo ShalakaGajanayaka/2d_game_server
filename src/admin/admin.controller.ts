@@ -307,6 +307,46 @@ export class AdminController {
   }
 
   // -------------------------------------------------------------
+  // PHASE 4: RECONCILIATION & FRAUD AUDIT ENDPOINTS
+  // -------------------------------------------------------------
+
+  @UseGuards(AdminAuthGuard)
+  @Get('api/audit/reconcile')
+  async runSystemAudit() {
+    return this.adminService.runFullSystemReconciliation();
+  }
+
+  @UseGuards(AdminAuthGuard)
+  @Get('api/audit/reconcile/:userId')
+  async reconcileUser(@Param('userId') userId: string) {
+    return this.adminService.reconcileUserLedger(userId);
+  }
+
+  @UseGuards(AdminAuthGuard)
+  @Get('api/fraud/alerts')
+  async getFraudAlerts() {
+    return this.adminService.getFraudAlerts();
+  }
+
+  @UseGuards(AdminAuthGuard)
+  @Post('api/users/:id/freeze')
+  async freezeUser(
+    @Param('id') id: string,
+    @Body() body: { reason?: string; adminUser?: string },
+  ) {
+    return this.adminService.freezeUser(id, body?.reason || 'Administrative Security Suspension', body?.adminUser || 'Admin');
+  }
+
+  @UseGuards(AdminAuthGuard)
+  @Post('api/users/:id/unfreeze')
+  async unfreezeUser(
+    @Param('id') id: string,
+    @Body() body: { adminUser?: string },
+  ) {
+    return this.adminService.unfreezeUser(id, body?.adminUser || 'Admin');
+  }
+
+  // -------------------------------------------------------------
   // WEB ADMIN DASHBOARD UI (SERVED AT GET /admin)
   // -------------------------------------------------------------
 
