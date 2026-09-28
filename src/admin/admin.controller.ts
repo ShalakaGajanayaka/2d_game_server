@@ -389,6 +389,27 @@ export class AdminController {
     );
   }
 
+  @UseGuards(AdminAuthGuard)
+  @Post('api/users/:id/adjust-balance')
+  async adjustUserBalance(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      action: 'RESET_ZERO' | 'SET_AMOUNT' | 'DEDUCT';
+      amount?: number;
+      reason?: string;
+      adminUser?: string;
+    },
+  ) {
+    return this.adminService.adjustUserBalance(
+      id,
+      body.action,
+      body.amount,
+      body.reason || 'Administrative Balance Adjustment',
+      body.adminUser || 'Admin',
+    );
+  }
+
   // -------------------------------------------------------------
   // WEB ADMIN DASHBOARD UI (SERVED AT GET /admin)
   // -------------------------------------------------------------

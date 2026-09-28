@@ -1106,5 +1106,107 @@ export class AdminService implements OnModuleInit {
       user: saved,
     };
   }
+
+  async adjustUserBalance(
+    userId: string,
+    action: 'RESET_ZERO' | 'SET_AMOUNT' | 'DEDUCT',
+    amount?: number,
+    reason: string = 'Administrative Balance Adjustment',
+    adminUser: string = 'Admin',
+  ) {
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    const currentBalance = Number(user.balance);
+    let newBalance = currentBalance;
+    let delta = 0;
+
+    if (action === 'RESET_ZERO') {
+      newBalance = 0;
+      delta = -currentBalance;
+    } else if (action === 'SET_AMOUNT') {
+      const target = Number(amount);
+      if (isNaN(target) || target < 0) {
+        throw new BadRequestException('Target amount must be a positive number');
+      }
+      newBalance = parseFloat(target.toFixed(2));
+      delta = parseFloat((newBalance - currentBalance).toFixed(2));
+    } else if (action === 'DEDUCT') {
+      const deductAmt = Number(amount);
+      if (isNaN(deductAmt) || deductAmt <= 0) {
+        throw new BadRequestException('Deduct amount must be greater than zero');
+      }
+      newBalance = Math.max(0, parseFloat((currentBalance - deductAmt).toFixed(2)));
+      delta = parseFloat((newBalance - currentBalance).toFixed(2));
+    } else {
+      throw new BadRequestException('Invalid balance adjustment action');
+    }
+
+    let savedUser: User | null = null;
+    await this.userRepo.manager.transaction(async (manager) => {
+      const lockedUser = await manager.findOne(User, {
+        where: { id: userId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!lockedUser) throw new NotFoundException('User not found during transaction');
+
+      lockedUser.balance = newBalance;
+      savedUser = await manager.save(lockedUser);
+
+      await manager.save(Transaction, {
+        userId: savedUser.id,
+        type: action === 'RESET_ZERO' ? 'ADMIN_RESET' : (delta < 0 ? 'ADMIN_DEDUCT' : 'ADMIN_CREDIT'),
+        amount: delta,
+        currency: savedUser.currency || 'LKR',
+        multiplier: null,
+        balanceAfter: newBalance,
+      });
+    });
+
+    if (!savedUser) throw new BadRequestException('Failed to adjust balance');
+    const userObj: User = savedUser;
+
+    try {
+      const sanitized = {
+        id: userObj.id,
+        username: userObj.username,
+        email: userObj.email,
+        phoneNumber: userObj.phoneNumber,
+        currency: userObj.currency,
+        balance: Number(userObj.balance),
+        gamesPlayed: Number(userObj.gamesPlayed),
+        totalWon: Number(userObj.totalWon),
+        bestMultiplier: Number(userObj.bestMultiplier),
+        createdAt: userObj.createdAt ? new Date(userObj.createdAt).getTime() : Date.now(),
+        savedWithdrawalDetails: userObj.savedWithdrawalDetails,
+        isFrozen: userObj.isFrozen,
+        isMarketing: userObj.isMarketing,
+        isMarketingAutoWin: userObj.isMarketingAutoWin,
+      };
+      await this.redisService.set(`user:${userObj.username.toLowerCase()}`, JSON.stringify(sanitized));
+      if (userObj.email) {
+        await this.redisService.set(`user:${userObj.email.toLowerCase()}`, JSON.stringify(sanitized));
+      }
+    } catch {}
+
+    this.gameService.notifyUserBalance(
+      userObj.username,
+      newBalance,
+      `Wallet balance updated to ${userObj.currency} ${newBalance.toFixed(2)} (${reason})`,
+    );
+
+    this.logger.log(
+      `Balance adjusted for ${user.username}: ${currentBalance} -> ${newBalance} (delta: ${delta}) by ${adminUser}. Reason: ${reason}`,
+    );
+
+    return {
+      success: true,
+      message: `Balance adjusted for ${user.username} to ${newBalance.toFixed(2)}`,
+      oldBalance: currentBalance,
+      newBalance,
+      delta,
+      user: userObj,
+    };
+  }
 }
 
