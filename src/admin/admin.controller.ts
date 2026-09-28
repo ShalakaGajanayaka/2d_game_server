@@ -194,7 +194,7 @@ export class AdminController {
       throw new BadRequestException('Amount must be a non-negative number');
     }
     const updated = await this.adminService.setGlobalPool(body.amount);
-    return { success: true, globalPool: updated };
+    return { success: true, ...updated };
   }
 
   @UseGuards(AdminAuthGuard)

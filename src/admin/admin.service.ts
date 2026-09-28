@@ -163,6 +163,7 @@ export class AdminService implements OnModuleInit {
     const totalSystemBalance = allUsers.reduce((sum, u) => sum + Number(u.balance), 0);
     
     const globalPool = this.gameService.getGlobalPool();
+    const pendingGlobalPool = this.gameService.getPendingGlobalPool();
 
     // Company Real Net Profit: Total approved deposits - Total paid withdrawals - Active player wallets
     const companyNetProfit = parseFloat(
@@ -179,11 +180,17 @@ export class AdminService implements OnModuleInit {
       totalWithdrawnAmount,
       totalSystemBalance,
       globalPool,
+      pendingGlobalPool,
       companyNetProfit,
     };
   }
 
-  async setGlobalPool(amount: number): Promise<number> {
+  async setGlobalPool(amount: number): Promise<{
+    globalPool: number;
+    pending: boolean;
+    target: number;
+    appliedRound: string;
+  }> {
     return this.gameService.setGlobalPool(amount);
   }
 
@@ -192,7 +199,14 @@ export class AdminService implements OnModuleInit {
     amount: number;
     note?: string;
     adminUser?: string;
-  }): Promise<{ success: boolean; globalPool: number; auditLog: PoolAuditLog }> {
+  }): Promise<{
+    success: boolean;
+    globalPool: number;
+    pending: boolean;
+    target: number;
+    appliedRound: string;
+    auditLog: PoolAuditLog;
+  }> {
     const currentPool = this.gameService.getGlobalPool();
     let target = currentPool;
 
@@ -212,20 +226,23 @@ export class AdminService implements OnModuleInit {
       );
     }
 
-    const updatedPool = await this.gameService.setGlobalPool(target);
+    const poolResult = await this.gameService.setGlobalPool(target);
 
     const log = await this.poolAuditRepo.save({
       adminUser: dto.adminUser || 'Admin',
       action: dto.action,
       previousAmount: currentPool,
-      newAmount: updatedPool,
-      delta: parseFloat((updatedPool - currentPool).toFixed(2)),
-      note: dto.note || '',
+      newAmount: target,
+      delta: parseFloat((target - currentPool).toFixed(2)),
+      note: `${dto.note ? dto.note + ' ' : ''}${poolResult.pending ? '[Staged for Next Round]' : '[Applied Immediately]'}`,
     });
 
     return {
       success: true,
-      globalPool: updatedPool,
+      globalPool: poolResult.globalPool,
+      pending: poolResult.pending,
+      target: poolResult.target,
+      appliedRound: poolResult.appliedRound,
       auditLog: log,
     };
   }
