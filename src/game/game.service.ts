@@ -46,6 +46,8 @@ export class GameService implements OnModuleInit {
   private currentMultiplier: number = 1.0;
   private crashPoint: number = 1.0;
   private startTime: number = 0;
+  private targetStartTime: number = 0;
+  private flightTickCount: number = 0;
   private timer: NodeJS.Timeout | null = null;
   private gameLoopTimer: NodeJS.Timeout | null = null;
   private botStreamTimer: NodeJS.Timeout | null = null;
@@ -342,6 +344,7 @@ export class GameService implements OnModuleInit {
 
     this.status = GameStatus.WAITING;
     this.countdown = 10;
+    this.targetStartTime = Date.now() + 10000;
     this.currentMultiplier = 1.0;
     this.activeRealLiability = 0; // Reset for the new round
     
@@ -353,7 +356,7 @@ export class GameService implements OnModuleInit {
     this.pendingRoundBots = allBots.slice(initialCount);
 
     this.logger.log(`Starting countdown. Initial bets: ${this.currentRoundBets.length}, Total targeted: ${allBots.length}`);
-    this.broadcastState();
+    this.broadcastState(true); // Broadcast initial state WITH initial bets
 
     if (this.timer) clearInterval(this.timer);
     if (this.botStreamTimer) clearInterval(this.botStreamTimer);
@@ -380,7 +383,7 @@ export class GameService implements OnModuleInit {
 
     this.timer = setInterval(() => {
       this.countdown--;
-      this.broadcastState(); // Broadcast every second during countdown
+      this.broadcastState(false); // Broadcast lightweight countdown tick (no heavy bets array)
       
       // Flush any remaining pending bots so everyone is in right before flight
       if (this.countdown <= 1) {
@@ -406,6 +409,7 @@ export class GameService implements OnModuleInit {
     this.crashPoint = this.generateCrashPoint();
     this.currentMultiplier = 1.0;
     this.startTime = Date.now();
+    this.flightTickCount = 0;
     
     if (this.botStreamTimer) clearInterval(this.botStreamTimer);
     // Ensure all pending bets are in
@@ -416,7 +420,7 @@ export class GameService implements OnModuleInit {
     this.logger.log(`Game started. Total bets: ${this.currentRoundBets.length}, Crash point: ${this.crashPoint}`);
     
     // Broadcast the START event so clients can begin animation syncing to startTime
-    this.broadcastState();
+    this.broadcastState(false);
 
     if (this.gameLoopTimer) clearInterval(this.gameLoopTimer);
     
@@ -425,6 +429,17 @@ export class GameService implements OnModuleInit {
       const elapsedSeconds = (Date.now() - this.startTime) / 1000;
       // Formula matches flutter: 1.0 + (time^2.5) / 10
       this.currentMultiplier = 1.0 + Math.pow(elapsedSeconds, 2.5) / 10;
+
+      this.flightTickCount++;
+      // Every 250ms (5 ticks of 50ms), emit lightweight flight sync heartbeat
+      if (this.flightTickCount % 5 === 0 && this.server) {
+        this.server.emit('flightSync', {
+          multiplier: parseFloat(this.currentMultiplier.toFixed(2)),
+          elapsedSeconds: parseFloat(elapsedSeconds.toFixed(2)),
+          startTime: this.startTime,
+          serverTime: Date.now(),
+        });
+      }
 
       // Check for bot cashouts
       for (const bot of this.currentRoundBets) {
@@ -467,7 +482,7 @@ export class GameService implements OnModuleInit {
     this.currentMultiplier = this.crashPoint;
     
     this.logger.log(`Crashed at ${this.crashPoint}`);
-    this.broadcastState();
+    this.broadcastState(false);
 
     // Trigger crash callbacks for authoritative round settlement
     for (const cb of this.crashCallbacks) {
@@ -509,19 +524,22 @@ export class GameService implements OnModuleInit {
     return parseFloat(point.toFixed(2));
   }
 
-  private broadcastState() {
+  private broadcastState(includeFullBets: boolean = true) {
     if (this.server) {
-      this.server.emit('gameState', this.getGameState());
+      this.server.emit('gameState', this.getGameState(includeFullBets));
     }
   }
 
-  public getGameState() {
+  public getGameState(includeFullBets: boolean = true) {
     return {
       status: this.status,
       countdown: this.countdown,
-      currentMultiplier: this.currentMultiplier,
+      targetStartTime: this.targetStartTime,
+      currentMultiplier: parseFloat(this.currentMultiplier.toFixed(2)),
       startTime: this.startTime,
-      bets: this.currentRoundBets,
+      crashPoint: this.status === GameStatus.CRASHED ? this.crashPoint : null,
+      serverTime: Date.now(),
+      bets: includeFullBets ? this.currentRoundBets : null,
     };
   }
 
