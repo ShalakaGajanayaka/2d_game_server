@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException, BadRequestException, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike } from 'typeorm';
 import { User } from '../auth/entities/user.entity';
@@ -481,6 +481,9 @@ export class AdminService implements OnModuleInit {
         balance: true,
         gamesPlayed: true,
         totalWon: true,
+        isFrozen: true,
+        isMarketing: true,
+        isMarketingAutoWin: true,
         createdAt: true,
       },
     });
@@ -512,6 +515,10 @@ export class AdminService implements OnModuleInit {
     const user = await this.userRepo.findOne({ where: [{ id: userId }, { username }] });
     if (!user) {
       throw new NotFoundException('User account not found');
+    }
+
+    if (user.isMarketing) {
+      throw new ForbiddenException('Marketing promotional accounts are strictly restricted from real money withdrawals.');
     }
 
     const currentBalance = Number(user.balance);
@@ -1052,6 +1059,52 @@ export class AdminService implements OnModuleInit {
 
     this.logger.log(`User ${user.username} unfrozen by ${adminUser}`);
     return saved;
+  }
+
+  async toggleMarketingStatus(
+    userId: string,
+    isMarketing: boolean,
+    isMarketingAutoWin: boolean,
+    adminUser: string = 'Admin',
+  ) {
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    user.isMarketing = isMarketing;
+    user.isMarketingAutoWin = isMarketing ? isMarketingAutoWin : false;
+    const saved = await this.userRepo.save(user);
+
+    try {
+      const sanitized = {
+        id: saved.id,
+        username: saved.username,
+        email: saved.email,
+        phoneNumber: saved.phoneNumber,
+        currency: saved.currency,
+        balance: Number(saved.balance),
+        gamesPlayed: Number(saved.gamesPlayed),
+        totalWon: Number(saved.totalWon),
+        bestMultiplier: Number(saved.bestMultiplier),
+        createdAt: saved.createdAt ? new Date(saved.createdAt).getTime() : Date.now(),
+        savedWithdrawalDetails: saved.savedWithdrawalDetails,
+        isFrozen: saved.isFrozen,
+        isMarketing: saved.isMarketing,
+        isMarketingAutoWin: saved.isMarketingAutoWin,
+      };
+      await this.redisService.set(`user:${saved.username.toLowerCase()}`, JSON.stringify(sanitized));
+      if (saved.email) {
+        await this.redisService.set(`user:${saved.email.toLowerCase()}`, JSON.stringify(sanitized));
+      }
+    } catch {}
+
+    this.logger.log(
+      `Marketing status for user ${user.username} updated: isMarketing=${saved.isMarketing}, isMarketingAutoWin=${saved.isMarketingAutoWin} by ${adminUser}`,
+    );
+    return {
+      success: true,
+      message: `Marketing status updated for ${user.username}`,
+      user: saved,
+    };
   }
 }
 

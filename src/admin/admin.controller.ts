@@ -375,6 +375,20 @@ export class AdminController {
     return this.adminService.unfreezeUser(id, body?.adminUser || 'Admin');
   }
 
+  @UseGuards(AdminAuthGuard)
+  @Post('api/users/:id/marketing')
+  async updateMarketingStatus(
+    @Param('id') id: string,
+    @Body() body: { isMarketing: boolean; isMarketingAutoWin: boolean; adminUser?: string },
+  ) {
+    return this.adminService.toggleMarketingStatus(
+      id,
+      !!body?.isMarketing,
+      !!body?.isMarketingAutoWin,
+      body?.adminUser || 'Admin',
+    );
+  }
+
   // -------------------------------------------------------------
   // WEB ADMIN DASHBOARD UI (SERVED AT GET /admin)
   // -------------------------------------------------------------

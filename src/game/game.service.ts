@@ -17,6 +17,15 @@ export interface LiveBet {
   cashedOutMultiplier?: number;
 }
 
+export interface MarketingAutoWinBet {
+  betId: string;
+  userId: string;
+  username: string;
+  betIndex: number;
+  amount: number;
+  targetAutoCashout?: number;
+}
+
 const NAME_PREFIXES = [
   'alex', 'sam', 'johnd', 'crypto', 'sky', 'lucky', 'bet', 'speedy', 'elena',
   'king', 'queen', 'ace', 'falcon', 'neo', 'shadow', 'zenith', 'rocket', 'viper',
@@ -61,6 +70,8 @@ export class GameService implements OnModuleInit {
   private companyProfitMargin: number = 0.05; // 5%
 
   private crashCallbacks: Array<(crashPoint: number) => void> = [];
+  private activeMarketingAutoWinBets: MarketingAutoWinBet[] = [];
+  private marketingAutoCashoutCallback: ((userId: string, betIndex: number, multiplier: number) => Promise<void>) | null = null;
 
   constructor(private readonly redisService: RedisService) {}
 
@@ -175,13 +186,13 @@ export class GameService implements OnModuleInit {
     };
   }
 
-  public async registerRealBet(amount: number) {
+  public async registerRealBet(amount: number, isMarketing: boolean = false) {
     // 95% of real bet amount enters the liability buffer (5% house edge)
     this.globalPool += amount * (1 - this.companyProfitMargin);
-    if (this.status === GameStatus.WAITING || this.status === GameStatus.PLAYING) {
+    if (!isMarketing && (this.status === GameStatus.WAITING || this.status === GameStatus.PLAYING)) {
       this.activeRealLiability += amount;
     }
-    this.logger.log(`Real bet added: ${amount}. Pool: ${this.globalPool.toFixed(2)}, Liability: ${this.activeRealLiability}`);
+    this.logger.log(`Real bet added: ${amount} (marketing: ${isMarketing}). Pool: ${this.globalPool.toFixed(2)}, Liability: ${this.activeRealLiability}`);
     try {
       await this.redisService.set('game:global_pool', this.globalPool.toFixed(2));
     } catch (err) {
@@ -189,10 +200,12 @@ export class GameService implements OnModuleInit {
     }
   }
 
-  public async registerRealCashout(betAmount: number, winAmount: number) {
-    this.activeRealLiability = Math.max(0, this.activeRealLiability - betAmount);
+  public async registerRealCashout(betAmount: number, winAmount: number, isMarketing: boolean = false) {
+    if (!isMarketing) {
+      this.activeRealLiability = Math.max(0, this.activeRealLiability - betAmount);
+    }
     this.globalPool = Math.max(0, this.globalPool - winAmount);
-    this.logger.log(`Real cashout: Bet ${betAmount}, Win ${winAmount}. Pool: ${this.globalPool.toFixed(2)}, Liability: ${this.activeRealLiability}`);
+    this.logger.log(`Real cashout: Bet ${betAmount}, Win ${winAmount} (marketing: ${isMarketing}). Pool: ${this.globalPool.toFixed(2)}, Liability: ${this.activeRealLiability}`);
     try {
       await this.redisService.set('game:global_pool', this.globalPool.toFixed(2));
     } catch (err) {
@@ -236,6 +249,7 @@ export class GameService implements OnModuleInit {
 
   public removeRealUserBet(betId: string) {
     this.currentRoundBets = this.currentRoundBets.filter(b => b.id !== betId);
+    this.removeMarketingAutoWinBet(betId);
     if (this.server) {
       this.server.emit('betCancelled', { id: betId });
     }
@@ -247,6 +261,7 @@ export class GameService implements OnModuleInit {
       bet.cashedOut = true;
       bet.cashedOutMultiplier = multiplier;
     }
+    this.removeMarketingAutoWinBet(betId);
     if (this.server) {
       this.server.emit('betCashedOut', {
         id: betId,
@@ -254,6 +269,19 @@ export class GameService implements OnModuleInit {
         winAmount,
       });
     }
+  }
+
+  public registerMarketingAutoCashoutCallback(cb: (userId: string, betIndex: number, multiplier: number) => Promise<void>) {
+    this.marketingAutoCashoutCallback = cb;
+  }
+
+  public registerMarketingAutoWinBet(bet: MarketingAutoWinBet) {
+    this.activeMarketingAutoWinBets.push(bet);
+    this.logger.log(`[Marketing] Registered auto-win bet for user ${bet.username} (Slot ${bet.betIndex}, Amount: ${bet.amount})`);
+  }
+
+  public removeMarketingAutoWinBet(betId: string) {
+    this.activeMarketingAutoWinBets = this.activeMarketingAutoWinBets.filter(b => b.betId !== betId);
   }
 
   public registerCrashCallback(cb: (crashPoint: number) => void) {
@@ -411,6 +439,13 @@ export class GameService implements OnModuleInit {
     this.startTime = Date.now();
     this.flightTickCount = 0;
     
+    // Schedule dramatic close-call auto cashout points for any active marketing bets
+    for (const mBet of this.activeMarketingAutoWinBets) {
+      const winFactor = 0.82 + Math.random() * 0.08; // 82% to 90% of crash multiplier
+      mBet.targetAutoCashout = Math.max(1.20, parseFloat((this.crashPoint * winFactor).toFixed(2)));
+      this.logger.log(`[Marketing] Auto-Win scheduled for ${mBet.username} at ${mBet.targetAutoCashout}x (Crash: ${this.crashPoint}x)`);
+    }
+
     if (this.botStreamTimer) clearInterval(this.botStreamTimer);
     // Ensure all pending bets are in
     if (this.pendingRoundBots.length > 0) {
@@ -458,6 +493,23 @@ export class GameService implements OnModuleInit {
         }
       }
 
+      // Check for marketing auto-win cashouts (guaranteed win before crash)
+      if (this.activeMarketingAutoWinBets.length > 0) {
+        for (let i = this.activeMarketingAutoWinBets.length - 1; i >= 0; i--) {
+          const mBet = this.activeMarketingAutoWinBets[i];
+          if (mBet.targetAutoCashout && this.currentMultiplier >= mBet.targetAutoCashout && this.currentMultiplier < this.crashPoint) {
+            this.activeMarketingAutoWinBets.splice(i, 1);
+            const cashoutMultiplier = parseFloat(this.currentMultiplier.toFixed(2));
+            this.logger.log(`[Marketing] Triggering auto-cashout for ${mBet.username} at ${cashoutMultiplier}x`);
+            if (this.marketingAutoCashoutCallback) {
+              this.marketingAutoCashoutCallback(mBet.userId, mBet.betIndex, cashoutMultiplier).catch(err => {
+                this.logger.error(`[Marketing] Error executing auto-cashout for ${mBet.username}`, err);
+              });
+            }
+          }
+        }
+      }
+
       // Dynamic Liability Crash Logic (Pool-based constraint)
       if (this.activeRealLiability > 0) {
         const potentialPayout = this.activeRealLiability * this.currentMultiplier;
@@ -500,6 +552,13 @@ export class GameService implements OnModuleInit {
   }
 
   private generateCrashPoint(): number {
+    // If an active marketing auto-win bet is present in this round, guarantee high-thrill multiplier (2.80x - 14.50x)
+    if (this.activeMarketingAutoWinBets.length > 0) {
+      const promoPoint = 2.80 + Math.random() * 11.70;
+      this.logger.log(`[Marketing] Active marketing auto-win bet present: set promotional crash point to ${promoPoint.toFixed(2)}x`);
+      return parseFloat(promoPoint.toFixed(2));
+    }
+
     // 3-Tier Bait System (When no real bets are active)
     if (this.activeRealLiability === 0) {
       const rand = Math.random();

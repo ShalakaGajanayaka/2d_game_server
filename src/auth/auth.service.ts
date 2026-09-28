@@ -102,6 +102,8 @@ export interface UserProfile {
   freezeReason?: string;
   isFlaggedForReview?: boolean;
   flaggedReason?: string;
+  isMarketing?: boolean;
+  isMarketingAutoWin?: boolean;
 }
 
 @Injectable()
@@ -125,6 +127,10 @@ export class AuthService implements OnModuleInit {
       this.handleRoundCrashed(crashPoint).catch(err => {
         this.logger.error('Failed to handle round crash cleanup in AuthService', err);
       });
+    });
+
+    this.gameService.registerMarketingAutoCashoutCallback(async (userId: string, betIndex: number, multiplier: number) => {
+      await this.executeMarketingAutoCashout(userId, betIndex, multiplier);
     });
   }
 
@@ -193,6 +199,8 @@ export class AuthService implements OnModuleInit {
       freezeReason: user.freezeReason || undefined,
       isFlaggedForReview: !!user.isFlaggedForReview,
       flaggedReason: user.flaggedReason || undefined,
+      isMarketing: !!user.isMarketing,
+      isMarketingAutoWin: !!user.isMarketingAutoWin,
     };
   }
 
@@ -522,7 +530,10 @@ export class AuthService implements OnModuleInit {
       await this.redisService.set(betKey, JSON.stringify(betRecord), 180);
 
       // Register with GameService liability pool and live bets table
-      await this.gameService.registerRealBet(cleanAmount);
+      const isMarketingUser = !!savedUser!.isMarketing;
+      const isMarketingAutoWin = isMarketingUser && !!savedUser!.isMarketingAutoWin;
+
+      await this.gameService.registerRealBet(cleanAmount, isMarketingUser);
       this.gameService.addRealUserBet({
         id: betId,
         name: savedUser!.username,
@@ -530,6 +541,16 @@ export class AuthService implements OnModuleInit {
         targetMultiplier: 0,
         cashedOut: false,
       });
+
+      if (isMarketingAutoWin) {
+        this.gameService.registerMarketingAutoWinBet({
+          betId,
+          userId: savedUser!.id,
+          username: savedUser!.username,
+          betIndex,
+          amount: cleanAmount,
+        });
+      }
 
       const sanitized = this.sanitizeUser(savedUser!);
       try {
@@ -736,6 +757,86 @@ export class AuthService implements OnModuleInit {
         betIndex,
         user: sanitized,
       };
+    } finally {
+      await this.redisService.releaseLock(lockKey);
+    }
+  }
+
+  async executeMarketingAutoCashout(userId: string, betIndex: number, currentMultiplier: number) {
+    const lockKey = `lock:cashout:${userId}:${betIndex}`;
+    const acquired = await this.redisService.acquireLock(lockKey, 3);
+    if (!acquired) {
+      return;
+    }
+
+    try {
+      const betKey = `active_bet:${userId}:${betIndex}`;
+      const raw = await this.redisService.get(betKey);
+      if (!raw) {
+        return;
+      }
+      await this.redisService.del(betKey);
+
+      const betRecord = JSON.parse(raw);
+      const betAmount = Number(betRecord.amount);
+      const crashPoint = this.gameService.getCrashPoint();
+      const winAmount = parseFloat((betAmount * currentMultiplier).toFixed(2));
+      const profit = parseFloat((winAmount - betAmount).toFixed(2));
+
+      let savedUser: User | null = null;
+      await this.userRepository.manager.transaction(async (manager) => {
+        const lockedUser = await manager.findOne(User, {
+          where: { id: userId },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!lockedUser) return;
+
+        const newBalance = parseFloat((Number(lockedUser.balance) + winAmount).toFixed(2));
+        lockedUser.balance = newBalance;
+        lockedUser.gamesPlayed = Number(lockedUser.gamesPlayed) + 1;
+        if (profit > 0) {
+          lockedUser.totalWon = parseFloat((Number(lockedUser.totalWon) + profit).toFixed(2));
+        }
+        if (currentMultiplier > Number(lockedUser.bestMultiplier)) {
+          lockedUser.bestMultiplier = currentMultiplier;
+        }
+
+        savedUser = await manager.save(lockedUser);
+
+        await manager.save(Transaction, {
+          userId: savedUser.id,
+          type: 'CASHOUT',
+          amount: winAmount,
+          currency: savedUser.currency || 'USD',
+          multiplier: currentMultiplier,
+          balanceAfter: newBalance,
+        });
+
+        await manager.save(BetHistory, {
+          userId: savedUser.id,
+          betAmount,
+          cashOutMultiplier: currentMultiplier,
+          crashPoint,
+          winAmount,
+          currency: savedUser.currency || 'USD',
+        });
+      });
+
+      if (!savedUser) return;
+
+      const userObj: User = savedUser;
+      await this.gameService.registerRealCashout(betAmount, winAmount, true);
+      this.gameService.markRealUserCashout(betRecord.id, currentMultiplier, winAmount);
+      this.gameService.notifyUserBalance(userObj.username, Number(userObj.balance), `🎉 Promotional Auto-Win: +${userObj.currency} ${winAmount}`);
+
+      const sanitized = this.sanitizeUser(userObj);
+      try {
+        await this.redisService.set(`user:${userObj.username.toLowerCase()}`, JSON.stringify(sanitized));
+      } catch {}
+
+      this.logger.log(`[Marketing Auto-Win] Successfully cashed out for ${userObj.username}: +${userObj.currency} ${winAmount} at ${currentMultiplier}x`);
+    } catch (err) {
+      this.logger.error(`[Marketing Auto-Win] Error executing auto cashout for user ${userId}`, err);
     } finally {
       await this.redisService.releaseLock(lockKey);
     }

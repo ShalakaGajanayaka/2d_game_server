@@ -47,6 +47,12 @@ export class User {
   @Column({ nullable: true })
   flaggedReason: string;
 
+  @Column({ default: false })
+  isMarketing: boolean;
+
+  @Column({ default: false })
+  isMarketingAutoWin: boolean;
+
   @CreateDateColumn()
   createdAt: Date;
 
