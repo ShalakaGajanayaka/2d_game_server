@@ -740,6 +740,96 @@ export class AdminService implements OnModuleInit {
     };
   }
 
+  async clientCancelWithdrawal(
+    userId: string,
+    withdrawalId: string,
+  ): Promise<{ success: boolean; message: string; withdrawal: WithdrawalRequest; newBalance: number }> {
+    const withdrawal = await this.withdrawalRepo.findOne({ where: { id: withdrawalId } });
+    if (!withdrawal) {
+      throw new NotFoundException('Withdrawal request not found');
+    }
+
+    if (withdrawal.userId !== userId) {
+      throw new BadRequestException('You do not have permission to cancel this withdrawal request.');
+    }
+
+    if (withdrawal.status !== WithdrawalStatus.PENDING) {
+      throw new BadRequestException(`Withdrawal cannot be cancelled because it is already ${withdrawal.status}.`);
+    }
+
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('User account not found');
+    }
+
+    // Instantly refund escrowed amount back to playable balance
+    const refundAmount = Number(withdrawal.amount);
+    const prevBalance = Number(user.balance);
+    const newBalance = parseFloat((prevBalance + refundAmount).toFixed(2));
+    user.balance = newBalance;
+    const savedUser = await this.userRepo.save(user);
+
+    // Update Redis Cache
+    try {
+      const sanitized = {
+        id: savedUser.id,
+        username: savedUser.username,
+        email: savedUser.email,
+        phoneNumber: savedUser.phoneNumber,
+        currency: savedUser.currency,
+        balance: Number(savedUser.balance),
+        gamesPlayed: Number(savedUser.gamesPlayed),
+        totalWon: Number(savedUser.totalWon),
+        bestMultiplier: Number(savedUser.bestMultiplier),
+        createdAt: savedUser.createdAt ? new Date(savedUser.createdAt).getTime() : Date.now(),
+      };
+      await this.redisService.set(`user:${savedUser.username.toLowerCase()}`, JSON.stringify(sanitized));
+      if (savedUser.email) {
+        await this.redisService.set(`user:${savedUser.email.toLowerCase()}`, JSON.stringify(sanitized));
+      }
+    } catch {}
+
+    // Record Transaction Ledger Entry
+    try {
+      await this.transactionRepo.save({
+        userId: savedUser.id,
+        type: 'WITHDRAWAL_CANCEL_REFUND',
+        amount: refundAmount,
+        multiplier: null,
+        balanceAfter: newBalance,
+        currency: withdrawal.currency,
+      });
+    } catch (err) {
+      this.logger.error('Failed to log WITHDRAWAL_CANCEL_REFUND ledger entry', err);
+    }
+
+    // Update Withdrawal Request status to CANCELLED
+    withdrawal.status = WithdrawalStatus.CANCELLED;
+    withdrawal.adminNote = 'Cancelled by player to return funds to wallet';
+    withdrawal.processedBy = `Player (${savedUser.username})`;
+    withdrawal.processedAt = new Date();
+    const savedWithdrawal = await this.withdrawalRepo.save(withdrawal);
+
+    // Notify player's active game screen in real-time via Socket.IO
+    this.gameService.notifyUserBalance(
+      savedUser.username,
+      newBalance,
+      `Withdrawal cancelled! ${withdrawal.currency} ${refundAmount.toFixed(2)} refunded to your balance. Ready to play! 🔄`,
+    );
+
+    // Notify Next.js Admin Dashboard so admin live table updates
+    this.gameService.notifyNewWithdrawal(savedWithdrawal);
+
+    this.logger.log(`Withdrawal CANCELLED by player: ${savedWithdrawal.id} for ${savedUser.username} (+${withdrawal.currency} ${refundAmount.toFixed(2)})`);
+
+    return {
+      success: true,
+      message: `Withdrawal cancelled! ${withdrawal.currency} ${refundAmount.toFixed(2)} has been restored to your playable wallet balance.`,
+      withdrawal: savedWithdrawal,
+      newBalance,
+    };
+  }
+
   async getClientHistory(userId: string, username: string) {
     const deposits = await this.depositRepo.find({
       where: [{ userId }, { username }],
@@ -782,18 +872,18 @@ export class AdminService implements OnModuleInit {
 
     for (const tx of txs) {
       const amt = Number(tx.amount);
-      if (['DEPOSIT', 'MANUAL_CREDIT'].includes(tx.type)) {
-        calculatedBalance += amt;
-        totalDeposits += amt;
+      if (['DEPOSIT', 'MANUAL_CREDIT', 'WITHDRAWAL_REFUND', 'WITHDRAWAL_CANCEL_REFUND'].includes(tx.type)) {
+        calculatedBalance += Math.abs(amt);
+        totalDeposits += Math.abs(amt);
       } else if (['CASHOUT', 'CANCEL_BET', 'BONUS'].includes(tx.type)) {
-        calculatedBalance += amt;
-        totalWins += amt;
+        calculatedBalance += Math.abs(amt);
+        totalWins += Math.abs(amt);
       } else if (tx.type === 'BET') {
-        calculatedBalance -= amt;
-        totalBets += amt;
-      } else if (tx.type === 'WITHDRAWAL') {
-        calculatedBalance -= amt;
-        totalWithdrawals += amt;
+        calculatedBalance -= Math.abs(amt);
+        totalBets += Math.abs(amt);
+      } else if (['WITHDRAWAL', 'WITHDRAWAL_ESCROW'].includes(tx.type)) {
+        calculatedBalance -= Math.abs(amt);
+        totalWithdrawals += Math.abs(amt);
       }
     }
 

@@ -133,6 +133,35 @@ export class AdminController {
     };
   }
 
+  @Post('withdrawal-cancel')
+  async cancelClientWithdrawal(
+    @Body() body: { token: string; withdrawalId: string },
+  ) {
+    if (!body.token) {
+      throw new UnauthorizedException('Please log in to cancel a withdrawal request');
+    }
+    if (!body.withdrawalId) {
+      throw new BadRequestException('Withdrawal ID is required');
+    }
+
+    let username: string | null = null;
+    try {
+      username = await this.redisService.get(`token:${body.token}`);
+    } catch {}
+
+    if (!username) {
+      throw new UnauthorizedException('Session expired. Please log in again.');
+    }
+
+    const user = await this.userRepo.findOne({ where: { username } });
+    if (!user) {
+      throw new UnauthorizedException('User account not found');
+    }
+
+    const result = await this.adminService.clientCancelWithdrawal(user.id, body.withdrawalId);
+    return result;
+  }
+
   @Get('my-history')
   async getMyHistory(@Query('token') token?: string) {
     if (!token) {

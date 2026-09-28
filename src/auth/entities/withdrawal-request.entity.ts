@@ -11,6 +11,7 @@ export enum WithdrawalStatus {
   PENDING = 'PENDING',
   PAID = 'PAID',
   REJECTED = 'REJECTED',
+  CANCELLED = 'CANCELLED',
 }
 
 @Entity('withdrawal_requests')
