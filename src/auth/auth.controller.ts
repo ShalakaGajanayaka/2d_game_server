@@ -135,4 +135,21 @@ export class AuthController {
     const token = authHeader.replace('Bearer ', '').trim();
     return this.authService.saveBetHistory(token, body);
   }
+
+  @Get('exchange-rates')
+  getExchangeRates() {
+    return this.authService.getExchangeRates();
+  }
+
+  @Post('change-currency')
+  async changeCurrency(
+    @Headers('authorization') authHeader: string,
+    @Body() body: { token?: string; targetCurrency: string },
+  ) {
+    const token = this.extractToken(authHeader, body?.token);
+    if (!body?.targetCurrency) {
+      throw new BadRequestException('targetCurrency is required');
+    }
+    return this.authService.changeCurrency(token, body.targetCurrency);
+  }
 }

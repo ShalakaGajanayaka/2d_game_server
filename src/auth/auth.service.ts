@@ -86,6 +86,16 @@ export const TIMEZONE_TO_COUNTRY: Record<string, string> = {
   'america/vancouver': 'CA',
 };
 
+export const PLATFORM_EXCHANGE_RATES: Record<string, number> = {
+  USD: 1.0,      // Reference base
+  USDT: 1.0,     // 1:1 pegged with USD
+  LKR: 300.0,    // 1 USD = 300 LKR
+  INR: 85.0,     // 1 USD = 85 INR
+  EUR: 0.92,     // 1 USD = 0.92 EUR
+  GBP: 0.79,     // 1 USD = 0.79 GBP
+  AED: 3.67,     // 1 USD = 3.67 AED
+};
+
 export interface UserProfile {
   id: string;
   username: string;
@@ -1287,5 +1297,140 @@ export class AuthService implements OnModuleInit {
 
     // 4. Default fallback: Sri Lanka (LKR)
     return { ip: clientIp || '127.0.0.1', country: 'LK', currency: 'LKR', isLocal, source: 'default' };
+  }
+
+  getExchangeRates(): { base: string; rates: Record<string, number> } {
+    return {
+      base: 'USD',
+      rates: PLATFORM_EXCHANGE_RATES,
+    };
+  }
+
+  convertCurrency(amount: number, fromCurrency: string, toCurrency: string): { newAmount: number; rate: number } {
+    const from = (fromCurrency || 'USD').toUpperCase();
+    const to = (toCurrency || 'USD').toUpperCase();
+
+    if (from === to) {
+      return { newAmount: amount, rate: 1.0 };
+    }
+
+    const fromRate = PLATFORM_EXCHANGE_RATES[from] || 1.0;
+    const toRate = PLATFORM_EXCHANGE_RATES[to] || 1.0;
+
+    // Convert from -> USD base -> to
+    const effectiveRate = toRate / fromRate;
+    const rawConverted = (amount / fromRate) * toRate;
+
+    // Floor to 2 decimals to strictly prevent penny arbitrage
+    const newAmount = Math.floor(rawConverted * 100) / 100;
+    return { newAmount, rate: parseFloat(effectiveRate.toFixed(4)) };
+  }
+
+  async changeCurrency(token: string, targetCurrency: string): Promise<{
+    success: boolean;
+    user: UserProfile;
+    oldCurrency: string;
+    newCurrency: string;
+    oldBalance: number;
+    newBalance: number;
+    exchangeRate: number;
+    message: string;
+  }> {
+    const target = (targetCurrency || '').trim().toUpperCase();
+    if (!PLATFORM_EXCHANGE_RATES[target]) {
+      throw new BadRequestException(
+        `Unsupported target currency: ${targetCurrency}. Supported: ${Object.keys(PLATFORM_EXCHANGE_RATES).join(', ')}`,
+      );
+    }
+
+    let username: string | null = null;
+    try {
+      username = await this.redisService.get(`token:${token}`);
+    } catch {}
+
+    if (!username) {
+      throw new UnauthorizedException('Invalid or expired session');
+    }
+
+    const user = await this.userRepository.findOne({ where: { username } });
+    if (!user) {
+      throw new UnauthorizedException('User not found');
+    }
+
+    const currentCurrency = (user.currency || 'LKR').toUpperCase();
+    if (currentCurrency === target) {
+      throw new BadRequestException(`Your account is already set to ${target}`);
+    }
+
+    // Cybersecurity Guard 1: Check active Redis bet slots
+    try {
+      const bet1 = await this.redisService.get(`active_bet:${user.id}:1`);
+      const bet2 = await this.redisService.get(`active_bet:${user.id}:2`);
+      if (bet1 || bet2) {
+        throw new BadRequestException('Cannot change currency while you have an active bet placed! Please wait until the round concludes.');
+      }
+    } catch (e) {
+      if (e instanceof BadRequestException) throw e;
+    }
+
+    // Cybersecurity Guard 2: Check in-flight game round
+    if (this.gameService.hasActiveBet(user.username)) {
+      throw new BadRequestException('Cannot change currency while your plane bet is active! Please cash out or wait until the flight ends.');
+    }
+
+    const currentBalance = Number(user.balance || 0);
+    const { newAmount: newBalance, rate: exchangeRate } = this.convertCurrency(currentBalance, currentCurrency, target);
+
+    // Atomically update user entity
+    user.currency = target;
+    user.balance = newBalance;
+    const savedUser = await this.userRepository.save(user);
+
+    // Record audit ledger entry
+    try {
+      await this.transactionRepository.save({
+        userId: savedUser.id,
+        type: 'CURRENCY_CONVERSION',
+        amount: newBalance,
+        multiplier: exchangeRate,
+        balanceAfter: newBalance,
+        currency: target,
+      });
+    } catch (err) {
+      this.logger.warn(`Failed to record currency conversion ledger entry for ${user.username}`, err);
+    }
+
+    // Sync Redis Cache
+    const sanitized = this.sanitizeUser(savedUser);
+    try {
+      await this.redisService.set(`user:${savedUser.username.toLowerCase()}`, JSON.stringify(sanitized));
+      if (savedUser.email) {
+        await this.redisService.set(`user:${savedUser.email.toLowerCase()}`, JSON.stringify(sanitized));
+      }
+    } catch (err) {
+      this.logger.warn('Failed to update Redis cache on currency change', err);
+    }
+
+    // Broadcast real-time balance update over WebSocket to game client
+    this.gameService.notifyUserBalance(
+      savedUser.username,
+      newBalance,
+      `Currency switched to ${target}! Converted Balance: ${target} ${newBalance.toFixed(2)}`,
+    );
+
+    this.logger.log(
+      `[Currency Switch] User ${savedUser.username}: ${currentCurrency} ${currentBalance.toFixed(2)} -> ${target} ${newBalance.toFixed(2)} (Rate: ${exchangeRate})`,
+    );
+
+    return {
+      success: true,
+      user: sanitized,
+      oldCurrency: currentCurrency,
+      newCurrency: target,
+      oldBalance: currentBalance,
+      newBalance,
+      exchangeRate,
+      message: `Successfully switched account currency to ${target}`,
+    };
   }
 }

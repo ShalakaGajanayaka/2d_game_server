@@ -271,6 +271,13 @@ export class GameService implements OnModuleInit {
     }
   }
 
+  public hasActiveBet(username: string): boolean {
+    if (!username) return false;
+    return this.currentRoundBets.some(
+      b => b.name?.toLowerCase() === username.toLowerCase() && !b.cashedOut
+    );
+  }
+
   public registerMarketingAutoCashoutCallback(cb: (userId: string, betIndex: number, multiplier: number) => Promise<void>) {
     this.marketingAutoCashoutCallback = cb;
   }
