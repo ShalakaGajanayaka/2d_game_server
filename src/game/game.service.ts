@@ -577,10 +577,26 @@ export class GameService implements OnModuleInit {
       }
     }
 
-    // Default standard crash algorithm (when real bets are active)
-    const e = 100 / (Math.random() * 100 + 1);
-    const point = Math.max(1.01, e);
-    return parseFloat(point.toFixed(2));
+    // High-Margin 30% Player Win / 70% House Edge Distribution (When real bets are active)
+    const rand = Math.random();
+    if (rand < 0.70) {
+      // 70% House Win Zone: Plane crashes early (1.00x - 1.45x)
+      // Sub-tier: 8% Instant Crash (1.00x - 1.08x) to neutralize micro-scraping bots
+      if (rand < 0.08) {
+        const instantCrash = 1.00 + Math.random() * 0.08;
+        return parseFloat(instantCrash.toFixed(2));
+      }
+      const lowPoint = 1.09 + Math.random() * 0.36; // 1.09x - 1.45x (breaks 1.50x+ targets)
+      return parseFloat(lowPoint.toFixed(2));
+    } else if (rand < 0.95) {
+      // 25% Mid Win Zone: Multiplier 1.50x - 3.80x (sustains player engagement)
+      const midPoint = 1.50 + Math.random() * 2.30;
+      return parseFloat(midPoint.toFixed(2));
+    } else {
+      // 5% High Thrill / Jackpot Zone: Multiplier 4.00x - 25.00x
+      const highPoint = 4.00 + Math.random() * 21.00;
+      return parseFloat(highPoint.toFixed(2));
+    }
   }
 
   private broadcastState(includeFullBets: boolean = true) {
