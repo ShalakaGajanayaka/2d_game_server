@@ -119,10 +119,17 @@ export class AdminService implements OnModuleInit {
 
     // Check duplicate reference
     const existing = await this.depositRepo.findOne({
-      where: { referenceNumber: cleanRef, status: DepositStatus.APPROVED },
+      where: [
+        { referenceNumber: cleanRef, status: DepositStatus.APPROVED },
+        { referenceNumber: cleanRef, status: DepositStatus.PENDING },
+      ],
     });
     if (existing) {
-      throw new BadRequestException('This transaction reference has already been approved and credited');
+      if (existing.status === DepositStatus.APPROVED) {
+        throw new BadRequestException('This transaction reference has already been approved and credited');
+      } else {
+        throw new BadRequestException('A deposit request with this reference is already pending admin verification');
+      }
     }
 
     const newDeposit = this.depositRepo.create({
