@@ -292,7 +292,16 @@ export class AdminService implements OnModuleInit {
 
     const depositAmount = Number(deposit.amount);
     const prevBalance = Number(user.balance);
-    const newBalance = parseFloat((prevBalance + depositAmount).toFixed(2));
+
+    // Multi-Currency Normalization: Convert deposit currency to user's wallet currency
+    const depositCurrency = (deposit.currency || 'USD').toUpperCase();
+    const userCurrency = (user.currency || 'LKR').toUpperCase();
+    const depositRate = PLATFORM_EXCHANGE_RATES[depositCurrency] || 1.0;
+    const userRate = PLATFORM_EXCHANGE_RATES[userCurrency] || 1.0;
+
+    const creditedAmount = parseFloat(((depositAmount / depositRate) * userRate).toFixed(2));
+    const newBalance = parseFloat((prevBalance + creditedAmount).toFixed(2));
+    const fxRate = parseFloat((userRate / depositRate).toFixed(4));
 
     // Atomically update user balance in PostgreSQL
     user.balance = newBalance;
@@ -320,15 +329,15 @@ export class AdminService implements OnModuleInit {
       this.logger.warn('Failed to update user Redis cache on deposit approval', err);
     }
 
-    // Save transaction ledger entry
+    // Save transaction ledger entry in user's wallet currency
     try {
       await this.transactionRepo.save({
         userId: savedUser.id,
         type: 'DEPOSIT',
-        amount: depositAmount,
-        multiplier: null,
+        amount: creditedAmount,
+        multiplier: fxRate !== 1.0 ? fxRate : null,
         balanceAfter: newBalance,
-        currency: deposit.currency,
+        currency: userCurrency,
       });
     } catch (err) {
       this.logger.error('Failed to save deposit transaction ledger', err);
@@ -341,17 +350,26 @@ export class AdminService implements OnModuleInit {
     const savedDeposit = await this.depositRepo.save(deposit);
 
     // Notify player's active game screen in real-time via WebSocket
+    const creditMsg = depositCurrency === userCurrency
+      ? `Deposit of ${depositCurrency} ${depositAmount.toFixed(2)} approved! Your wallet has been credited. 💰`
+      : `Deposit of ${depositCurrency} ${depositAmount.toFixed(2)} approved! Credited ${userCurrency} ${creditedAmount.toFixed(2)} (Rate: 1 ${depositCurrency} = ${fxRate} ${userCurrency}) 💰`;
+
     this.gameService.notifyUserBalance(
-      savedUser.username,
+      {
+        id: savedUser.id,
+        username: savedUser.username,
+        email: savedUser.email,
+      },
       newBalance,
-      `Deposit of ${deposit.currency} ${depositAmount.toFixed(2)} approved! Your wallet has been credited. 💰`,
+      creditMsg,
+      userCurrency,
     );
 
-    this.logger.log(`Deposit APPROVED: ${savedDeposit.id} for ${savedUser.username} (+${savedDeposit.currency} ${depositAmount}). New Balance: ${newBalance}`);
+    this.logger.log(`Deposit APPROVED: ${savedDeposit.id} for ${savedUser.username} (+${savedDeposit.currency} ${depositAmount} -> +${userCurrency} ${creditedAmount}). New Balance: ${newBalance}`);
 
     return {
       success: true,
-      message: `Deposit of ${savedDeposit.currency} ${depositAmount.toFixed(2)} approved successfully for ${savedUser.username}!`,
+      message: `Deposit of ${savedDeposit.currency} ${depositAmount.toFixed(2)} approved successfully! Credited ${userCurrency} ${creditedAmount.toFixed(2)} to ${savedUser.username}.`,
       user: savedUser,
       deposit: savedDeposit,
     };

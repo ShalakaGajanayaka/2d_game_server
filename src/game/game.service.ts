@@ -625,11 +625,23 @@ export class GameService implements OnModuleInit {
     };
   }
 
-  public notifyUserBalance(username: string, balance: number, message?: string) {
+  public notifyUserBalance(
+    target: string | { id?: string; username?: string; email?: string },
+    balance: number,
+    message?: string,
+    currency?: string,
+  ) {
     if (this.server) {
+      const username = typeof target === 'string' ? target : (target?.username || '');
+      const email = typeof target === 'object' ? target?.email : undefined;
+      const userId = typeof target === 'object' ? target?.id : undefined;
+
       this.server.emit('userBalanceUpdated', {
         username,
+        email,
+        userId,
         balance,
+        currency,
         message: message || 'Your wallet balance has been updated.',
         timestamp: Date.now(),
       });
