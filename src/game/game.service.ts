@@ -462,8 +462,8 @@ export class GameService implements OnModuleInit {
     // Server checks for crash condition and bot cashouts 20 times a second
     this.gameLoopTimer = setInterval(() => {
       const elapsedSeconds = (Date.now() - this.startTime) / 1000;
-      // Formula matches flutter: 1.0 + (time^2.5) / 10
-      this.currentMultiplier = 1.0 + Math.pow(elapsedSeconds, 2.5) / 10;
+      // Industry standard smooth exponential progression: e^(0.095 * t) (~7.3s to reach 2.00x)
+      this.currentMultiplier = Math.max(1.0, Math.exp(0.095 * elapsedSeconds));
 
       this.flightTickCount++;
       // Every 250ms (5 ticks of 50ms), emit lightweight flight sync heartbeat
