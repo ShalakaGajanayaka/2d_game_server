@@ -483,16 +483,31 @@ export class AuthService implements OnModuleInit {
     if (betIndex !== 1 && betIndex !== 2) {
       throw new BadRequestException('Invalid bet slot index (must be 1 or 2)');
     }
-    const cleanAmount = parseFloat(Number(amount).toFixed(2));
-    if (isNaN(cleanAmount) || cleanAmount < 50 || cleanAmount > 20000) {
-      throw new BadRequestException('Bet amount must be between 50 and 20,000');
-    }
 
     if (this.gameService.getStatus() !== GameStatus.WAITING) {
       throw new BadRequestException('Bets can only be placed during the countdown phase');
     }
 
     const user = await this.validateUserFromToken(token);
+    const userCurrency = (user.currency || 'LKR').toUpperCase();
+
+    let minBet = 50.0;
+    let maxBet = 20000.0;
+    if (['USD', 'USDT', 'EUR', 'GBP'].includes(userCurrency)) {
+      minBet = 1.0;
+      maxBet = 500.0;
+    } else if (userCurrency === 'AED') {
+      minBet = 5.0;
+      maxBet = 2000.0;
+    } else if (userCurrency === 'INR') {
+      minBet = 20.0;
+      maxBet = 25000.0;
+    }
+
+    const cleanAmount = parseFloat(Number(amount).toFixed(2));
+    if (isNaN(cleanAmount) || cleanAmount < minBet || cleanAmount > maxBet) {
+      throw new BadRequestException(`Bet amount must be between ${minBet} and ${maxBet} ${userCurrency}`);
+    }
 
     // Phase 2: Distributed Atomic Mutex Lock
     const lockKey = `lock:bet:${user.id}:${betIndex}`;
