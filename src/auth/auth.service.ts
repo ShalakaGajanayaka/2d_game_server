@@ -385,7 +385,7 @@ export class AuthService implements OnModuleInit {
     };
   }
 
-  async getProfile(token: string): Promise<UserProfile> {
+  async getProfile(token: string): Promise<UserProfile & { activeBets?: any }> {
     let username: string | null = null;
     try {
       username = await this.redisService.get(`token:${token}`);
@@ -400,7 +400,20 @@ export class AuthService implements OnModuleInit {
       throw new UnauthorizedException('User not found');
     }
 
-    return this.sanitizeUser(user);
+    const sanitized = this.sanitizeUser(user);
+    try {
+      const rawBet1 = await this.redisService.get(`active_bet:${user.id}:1`);
+      const rawBet2 = await this.redisService.get(`active_bet:${user.id}:2`);
+      return {
+        ...sanitized,
+        activeBets: {
+          slot1: rawBet1 ? JSON.parse(rawBet1) : null,
+          slot2: rawBet2 ? JSON.parse(rawBet2) : null,
+        },
+      };
+    } catch {
+      return sanitized;
+    }
   }
 
   async renameUser(token: string, newUsername: string): Promise<UserProfile> {
