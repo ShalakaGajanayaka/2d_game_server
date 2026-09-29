@@ -512,12 +512,26 @@ export class AdminService implements OnModuleInit {
     saveDetails?: boolean,
   ): Promise<WithdrawalRequest> {
     const cleanAmount = Number(amount);
-    if (!cleanAmount || cleanAmount < 2500) {
-      throw new BadRequestException('Minimum withdrawal amount is 2500');
+    const targetCurrency = (currency || 'USD').toUpperCase();
+    const rate = PLATFORM_EXCHANGE_RATES[targetCurrency] || 1.0;
+    const usdtEquivalent = cleanAmount / rate;
+
+    // Minimum 7 USDT validation across all supported currencies
+    if (!cleanAmount || usdtEquivalent < 6.99) {
+      const minLocal = (7.0 * rate).toFixed(2);
+      throw new BadRequestException(
+        `Minimum withdrawal amount is 7 USDT (approx ${targetCurrency} ${minLocal})`,
+      );
     }
 
     if (!payoutDetails) {
       throw new BadRequestException('Payout details are required');
+    }
+
+    if (this.gameService.hasActiveBet(username)) {
+      throw new BadRequestException(
+        'Cannot request a withdrawal while you have an active bet in flight! Please cash out or wait for the round to conclude.',
+      );
     }
 
     const user = await this.userRepo.findOne({ where: [{ id: userId }, { username }] });
