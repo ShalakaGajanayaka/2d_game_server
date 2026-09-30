@@ -201,7 +201,24 @@ export class AdminController {
       throw new UnauthorizedException('Admin credentials not configured on server');
     }
 
-    if (body.username === adminUsername && body.password === adminPassword) {
+    const inputUser = (body.username || '').trim().toLowerCase();
+    const targetUser = adminUsername.trim().toLowerCase();
+    const inputPass = (body.password || '').trim();
+    const targetPass = adminPassword.trim();
+
+    const userMatch = inputUser === targetUser;
+
+    // Constant-time comparison for password to protect against timing attacks
+    let passMatch = false;
+    try {
+      const bufA = Buffer.from(inputPass);
+      const bufB = Buffer.from(targetPass);
+      passMatch = bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+    } catch {
+      passMatch = false;
+    }
+
+    if (userMatch && passMatch) {
       const token = crypto.randomBytes(32).toString('hex');
       await this.redisService.set(`admin_token:${token}`, 'admin', 86400); // 24 hours
       return { token };
