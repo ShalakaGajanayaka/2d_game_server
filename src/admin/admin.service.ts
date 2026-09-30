@@ -155,11 +155,19 @@ export class AdminService implements OnModuleInit {
 
   async getDashboardStats() {
     const totalUsers = await this.userRepo.count();
-    const pendingDeposits = await this.depositRepo.count({ where: { status: DepositStatus.PENDING } });
-    const approvedDeposits = await this.depositRepo.count({ where: { status: DepositStatus.APPROVED } });
+    const allUsers = await this.userRepo.find();
 
+    // Identify marketing promotional user IDs to isolate promotional balances and demo credits
+    const marketingUserIds = new Set(allUsers.filter((u) => u.isMarketing).map((u) => u.id));
+    const realUsers = allUsers.filter((u) => !u.isMarketing);
+
+    const pendingDeposits = await this.depositRepo.count({ where: { status: DepositStatus.PENDING } });
+
+    // Only real non-marketing customer deposits contribute to Real Deposited Volume
     const approvedList = await this.depositRepo.find({ where: { status: DepositStatus.APPROVED } });
-    const totalDepositedAmount = approvedList.reduce((sum, d) => sum + Number(d.amount), 0);
+    const realApprovedList = approvedList.filter((d) => !marketingUserIds.has(d.userId));
+    const approvedDeposits = realApprovedList.length;
+    const totalDepositedAmount = realApprovedList.reduce((sum, d) => sum + Number(d.amount), 0);
 
     const pendingWithdrawals = await this.withdrawalRepo.count({ where: { status: WithdrawalStatus.PENDING } });
     const paidWithdrawals = await this.withdrawalRepo.count({ where: { status: WithdrawalStatus.PAID } });
@@ -167,13 +175,14 @@ export class AdminService implements OnModuleInit {
     const paidWithdrawalList = await this.withdrawalRepo.find({ where: { status: WithdrawalStatus.PAID } });
     const totalWithdrawnAmount = paidWithdrawalList.reduce((sum, w) => sum + Number(w.amount), 0);
 
-    const allUsers = await this.userRepo.find();
-    const totalSystemBalance = allUsers.reduce((sum, u) => sum + Number(u.balance), 0);
+    // Only real customer wallets count toward real active system liability
+    const totalSystemBalance = realUsers.reduce((sum, u) => sum + Number(u.balance), 0);
+    const marketingSystemBalance = allUsers.filter((u) => u.isMarketing).reduce((sum, u) => sum + Number(u.balance), 0);
     
     const globalPool = this.gameService.getGlobalPool();
     const pendingGlobalPool = this.gameService.getPendingGlobalPool();
 
-    // Company Real Net Profit: Total approved deposits - Total paid withdrawals - Active player wallets
+    // Company Real Net Profit: Real Customer Deposits - Real Paid Withdrawals - Real Active Player Balances
     const companyNetProfit = parseFloat(
       (totalDepositedAmount - totalWithdrawnAmount - totalSystemBalance).toFixed(2)
     );
@@ -187,6 +196,7 @@ export class AdminService implements OnModuleInit {
       paidWithdrawals,
       totalWithdrawnAmount,
       totalSystemBalance,
+      marketingSystemBalance,
       globalPool,
       pendingGlobalPool,
       companyNetProfit,

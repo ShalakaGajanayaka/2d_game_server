@@ -187,41 +187,45 @@ export class GameService implements OnModuleInit {
   }
 
   public async registerRealBet(amount: number, isMarketing: boolean = false) {
-    // 95% of real bet amount enters the liability buffer (5% house edge)
-    this.globalPool += amount * (1 - this.companyProfitMargin);
-    if (!isMarketing && (this.status === GameStatus.WAITING || this.status === GameStatus.PLAYING)) {
-      this.activeRealLiability += amount;
+    if (!isMarketing) {
+      // 95% of real bet amount enters the liability buffer (5% house edge)
+      this.globalPool += amount * (1 - this.companyProfitMargin);
+      if (this.status === GameStatus.WAITING || this.status === GameStatus.PLAYING) {
+        this.activeRealLiability += amount;
+      }
+      try {
+        await this.redisService.set('game:global_pool', this.globalPool.toFixed(2));
+      } catch (err) {
+        this.logger.warn('Failed to persist global pool to Redis', err);
+      }
     }
     this.logger.log(`Real bet added: ${amount} (marketing: ${isMarketing}). Pool: ${this.globalPool.toFixed(2)}, Liability: ${this.activeRealLiability}`);
-    try {
-      await this.redisService.set('game:global_pool', this.globalPool.toFixed(2));
-    } catch (err) {
-      this.logger.warn('Failed to persist global pool to Redis', err);
-    }
   }
 
   public async registerRealCashout(betAmount: number, winAmount: number, isMarketing: boolean = false) {
     if (!isMarketing) {
       this.activeRealLiability = Math.max(0, this.activeRealLiability - betAmount);
+      this.globalPool = Math.max(0, this.globalPool - winAmount);
+      try {
+        await this.redisService.set('game:global_pool', this.globalPool.toFixed(2));
+      } catch (err) {
+        this.logger.warn('Failed to persist global pool to Redis', err);
+      }
     }
-    this.globalPool = Math.max(0, this.globalPool - winAmount);
     this.logger.log(`Real cashout: Bet ${betAmount}, Win ${winAmount} (marketing: ${isMarketing}). Pool: ${this.globalPool.toFixed(2)}, Liability: ${this.activeRealLiability}`);
-    try {
-      await this.redisService.set('game:global_pool', this.globalPool.toFixed(2));
-    } catch (err) {
-      this.logger.warn('Failed to persist global pool to Redis', err);
-    }
   }
 
-  public async cancelRealBet(amount: number) {
-    this.globalPool = Math.max(0, this.globalPool - amount * (1 - this.companyProfitMargin));
-    this.activeRealLiability = Math.max(0, this.activeRealLiability - amount);
-    this.logger.log(`Real bet cancelled: ${amount}. Pool: ${this.globalPool.toFixed(2)}, Liability: ${this.activeRealLiability}`);
-    try {
-      await this.redisService.set('game:global_pool', this.globalPool.toFixed(2));
-    } catch (err) {
-      this.logger.warn('Failed to persist global pool to Redis', err);
+  public async cancelRealBet(amount: number, isMarketing: boolean = false) {
+    if (!isMarketing) {
+      this.globalPool = Math.max(0, this.globalPool - amount * (1 - this.companyProfitMargin));
+      this.activeRealLiability = Math.max(0, this.activeRealLiability - amount);
+      try {
+        await this.redisService.set('game:global_pool', this.globalPool.toFixed(2));
+      } catch (err) {
+        this.logger.warn('Failed to persist global pool to Redis', err);
+      }
     }
+    this.logger.log(`Real bet cancelled: ${amount} (marketing: ${isMarketing}). Pool: ${this.globalPool.toFixed(2)}, Liability: ${this.activeRealLiability}`);
   }
 
   public getStatus(): GameStatus {

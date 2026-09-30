@@ -661,7 +661,7 @@ export class AuthService implements OnModuleInit {
       });
 
       // Notify GameService
-      await this.gameService.cancelRealBet(refundAmount);
+      await this.gameService.cancelRealBet(refundAmount, !!savedUser!.isMarketing);
       this.gameService.removeRealUserBet(betRecord.id);
 
       const sanitized = this.sanitizeUser(savedUser!);
@@ -779,7 +779,7 @@ export class AuthService implements OnModuleInit {
       });
 
       // Notify GameService liability pool & real cashout broadcast
-      await this.gameService.registerRealCashout(betAmount, winAmount);
+      await this.gameService.registerRealCashout(betAmount, winAmount, !!savedUser!.isMarketing);
       this.gameService.markRealUserCashout(betRecord.id, currentMultiplier, winAmount);
 
       const sanitized = this.sanitizeUser(savedUser!);
