@@ -982,70 +982,73 @@ export class AdminService implements OnModuleInit {
     });
 
     const userCurrency = (user.currency || 'USD').toUpperCase();
-    let currentLedgerCurrency = txs.length > 0 && txs[0].currency ? txs[0].currency.toUpperCase() : userCurrency;
-    let calculatedBalance = 0;
+    const currentBalanceUSD = parseFloat(Number(user.balance || 0).toFixed(2));
+    let calculatedBalanceUSD = 0;
     let totalDeposits = 0;
     let totalWithdrawals = 0;
     let totalWins = 0;
     let totalBets = 0;
 
-    for (const tx of txs) {
-      const amt = Number(tx.amount);
-      const txCurrency = (tx.currency || currentLedgerCurrency).toUpperCase();
+    // Handle initial baseline: If user has balance but 0 transaction records
+    if (txs.length === 0 && currentBalanceUSD > 0) {
+      try {
+        await this.transactionRepo.save({
+          userId: user.id,
+          type: 'MANUAL_CREDIT',
+          amount: currentBalanceUSD,
+          currency: 'USD',
+          balanceAfter: currentBalanceUSD,
+        });
+        calculatedBalanceUSD = currentBalanceUSD;
+        totalDeposits = currentBalanceUSD;
+      } catch {}
+    } else {
+      for (const tx of txs) {
+        const amt = Number(tx.amount);
+        const txCurrency = (tx.currency || 'USD').toUpperCase();
+        const txRate = PLATFORM_EXCHANGE_RATES[txCurrency] || 1.0;
+        // Normalize any transaction amount strictly into base USD
+        const normalizedAmtUSD = parseFloat((amt / txRate).toFixed(2));
 
-      if (tx.type === 'CURRENCY_CONVERSION') {
-        // Multi-Currency Checkpoint: User converted currency through official exchange
-        // The balance was set to tx.balanceAfter in the new currency
-        calculatedBalance = Number(tx.balanceAfter);
-        currentLedgerCurrency = (tx.currency || userCurrency).toUpperCase();
-        continue;
-      }
+        if (tx.type === 'CURRENCY_CONVERSION') {
+          // Currency preference update: DB base balance in USD was unchanged
+          continue;
+        }
 
-      // If transaction currency differs from currently tracked ledger currency, normalize it
-      let normalizedAmt = amt;
-      if (txCurrency !== currentLedgerCurrency) {
-        const fromRate = PLATFORM_EXCHANGE_RATES[txCurrency] || 1.0;
-        const toRate = PLATFORM_EXCHANGE_RATES[currentLedgerCurrency] || 1.0;
-        normalizedAmt = (amt / fromRate) * toRate;
-      }
-
-      if (['DEPOSIT', 'MANUAL_CREDIT', 'WITHDRAWAL_REFUND', 'WITHDRAWAL_CANCEL_REFUND'].includes(tx.type)) {
-        calculatedBalance += Math.abs(normalizedAmt);
-        totalDeposits += Math.abs(normalizedAmt);
-      } else if (['CASHOUT', 'CANCEL_BET', 'BONUS'].includes(tx.type)) {
-        calculatedBalance += Math.abs(normalizedAmt);
-        totalWins += Math.abs(normalizedAmt);
-      } else if (tx.type === 'BET') {
-        calculatedBalance -= Math.abs(normalizedAmt);
-        totalBets += Math.abs(normalizedAmt);
-      } else if (['WITHDRAWAL', 'WITHDRAWAL_ESCROW'].includes(tx.type)) {
-        calculatedBalance -= Math.abs(normalizedAmt);
-        totalWithdrawals += Math.abs(normalizedAmt);
+        if (['DEPOSIT', 'MANUAL_CREDIT', 'WITHDRAWAL_REFUND', 'WITHDRAWAL_CANCEL_REFUND', 'ADMIN_CREDIT', 'BONUS'].includes(tx.type)) {
+          calculatedBalanceUSD += Math.abs(normalizedAmtUSD);
+          totalDeposits += Math.abs(normalizedAmtUSD);
+        } else if (['CASHOUT', 'CANCEL_BET'].includes(tx.type)) {
+          calculatedBalanceUSD += Math.abs(normalizedAmtUSD);
+          totalWins += Math.abs(normalizedAmtUSD);
+        } else if (tx.type === 'BET') {
+          calculatedBalanceUSD -= Math.abs(normalizedAmtUSD);
+          totalBets += Math.abs(normalizedAmtUSD);
+        } else if (['WITHDRAWAL', 'WITHDRAWAL_ESCROW'].includes(tx.type)) {
+          calculatedBalanceUSD -= Math.abs(normalizedAmtUSD);
+          totalWithdrawals += Math.abs(normalizedAmtUSD);
+        } else if (tx.type === 'ADMIN_RESET') {
+          calculatedBalanceUSD = 0;
+        } else if (tx.type === 'ADMIN_DEDUCT') {
+          calculatedBalanceUSD -= Math.abs(normalizedAmtUSD);
+        }
       }
     }
 
-    // Convert accumulated ledger balance to user's current currency if there's any residual discrepancy
-    if (currentLedgerCurrency !== userCurrency) {
-      const fromRate = PLATFORM_EXCHANGE_RATES[currentLedgerCurrency] || 1.0;
-      const toRate = PLATFORM_EXCHANGE_RATES[userCurrency] || 1.0;
-      calculatedBalance = (calculatedBalance / fromRate) * toRate;
-    }
-
-    calculatedBalance = parseFloat(calculatedBalance.toFixed(2));
-    const currentBalance = Number(user.balance);
-    const variance = parseFloat(Math.abs(currentBalance - calculatedBalance).toFixed(2));
-    // Tolerance of 0.10 for standard floating-point conversion roundings
-    const isClean = variance <= 0.10;
+    calculatedBalanceUSD = parseFloat(calculatedBalanceUSD.toFixed(2));
+    const varianceUSD = parseFloat(Math.abs(currentBalanceUSD - calculatedBalanceUSD).toFixed(2));
+    // Tolerance of 0.10 USD for standard floating-point conversion roundings
+    const isClean = varianceUSD <= 0.10;
 
     if (!isClean && !user.isFrozen) {
       user.isFrozen = true;
-      user.freezeReason = `Automated Security Audit: Ledger variance of ${userCurrency} ${variance.toFixed(2)} detected (Balance: ${currentBalance}, Ledger: ${calculatedBalance})`;
+      user.freezeReason = `Automated Security Audit: Ledger variance of $${varianceUSD.toFixed(2)} USD detected (Balance: $${currentBalanceUSD}, Ledger: $${calculatedBalanceUSD})`;
       user.isFlaggedForReview = true;
-      user.flaggedReason = `Ledger discrepancy: ${userCurrency} ${variance.toFixed(2)}`;
+      user.flaggedReason = `Ledger discrepancy: $${varianceUSD.toFixed(2)} USD`;
       await this.userRepo.save(user);
-      this.logger.error(`🚨 FRAUD ALARM: User ${user.username} frozen! Balance: ${currentBalance} ${userCurrency}, Ledger: ${calculatedBalance}, Variance: ${variance}`);
+      this.logger.error(`🚨 FRAUD ALARM: User ${user.username} frozen! Balance: $${currentBalanceUSD} USD, Ledger: $${calculatedBalanceUSD} USD, Variance: $${varianceUSD}`);
     } else if (isClean && user.isFrozen && user.freezeReason?.includes('Automated Security Audit: Ledger variance')) {
-      // Auto-recovery: User was suspended due to a false-positive ledger variance before multi-currency awareness
+      // Auto-recovery: User was suspended due to a false-positive ledger variance
       user.isFrozen = false;
       user.freezeReason = null as any;
       user.isFlaggedForReview = false;
@@ -1055,16 +1058,16 @@ export class AdminService implements OnModuleInit {
         await this.redisService.del(`user:${user.username.toLowerCase()}`);
         if (user.email) await this.redisService.del(`user:${user.email.toLowerCase()}`);
       } catch {}
-      this.logger.log(`🛡️ AUTO-RECOVERY: User ${user.username} successfully unfrozen after multi-currency reconciliation verified clean ledger!`);
+      this.logger.log(`🛡️ AUTO-RECOVERY: User ${user.username} successfully unfrozen after universal USD ledger reconciliation verified clean!`);
     }
 
     return {
       userId: user.id,
       username: user.username,
       currency: userCurrency,
-      currentBalance,
-      calculatedBalance,
-      variance,
+      currentBalance: currentBalanceUSD,
+      calculatedBalance: calculatedBalanceUSD,
+      variance: varianceUSD,
       isClean,
       isFrozen: user.isFrozen,
       freezeReason: user.freezeReason,
