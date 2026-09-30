@@ -566,20 +566,20 @@ export class GameService implements OnModuleInit {
       return parseFloat(promoPoint.toFixed(2));
     }
 
-    // 3-Tier Bait System (When no real bets are active)
+    // 3-Tier Bait System (When no real bets are active) - Calibrated to 32.50% (>5.00x)
     if (this.activeRealLiability === 0) {
       const rand = Math.random();
-      if (rand < 0.15) {
-        // 15% chance for Super FOMO (10x - 100x)
-        const fomoPoint = 10 + Math.random() * 90;
+      if (rand < 0.10) {
+        // 10% chance for Super FOMO (10x - 80x) -> 10.0% contribution to >5x
+        const fomoPoint = 10 + Math.random() * 70;
         return parseFloat(fomoPoint.toFixed(2));
-      } else if (rand < 0.60) {
-        // 45% chance for Mid-Bait (2.0x - 10.0x)
+      } else if (rand < 0.46) {
+        // 36% chance for Mid-Bait (2.0x - 10.0x) -> 22.5% contribution to >5x (5/8 of 36%)
         const midPoint = 2.0 + Math.random() * 8.0;
         return parseFloat(midPoint.toFixed(2));
       } else {
-        // 40% chance for Normal Low (1.01x - 2.0x)
-        const lowPoint = 1.01 + Math.random() * 0.99;
+        // 54% chance for Normal Low (1.01x - 1.99x) -> 0% contribution to >5x
+        const lowPoint = 1.01 + Math.random() * 0.98;
         return parseFloat(lowPoint.toFixed(2));
       }
     }
