@@ -73,7 +73,7 @@ export class AdminController {
       user.username,
       user.email,
       body.amount,
-      body.currency || user.currency || 'LKR',
+      body.currency || user.currency || 'USD',
       body.paymentMethod,
       body.referenceNumber,
     );
@@ -120,7 +120,7 @@ export class AdminController {
       user.username,
       user.email,
       body.amount,
-      body.currency || user.currency || 'LKR',
+      body.currency || user.currency || 'USD',
       body.method,
       body.payoutDetails,
       body.saveDetails,
@@ -870,7 +870,7 @@ export class AdminController {
       </div>
       <div class="stat-card" style="--card-accent: #3b82f6;">
         <div class="stat-label">Total Deposited Volume</div>
-        <div class="stat-value" id="stat-volume">LKR 0.00</div>
+        <div class="stat-value" id="stat-volume">$0.00 USD</div>
       </div>
       <div class="stat-card" style="--card-accent: #8b5cf6;">
         <div class="stat-label">Registered Players</div>
@@ -878,7 +878,7 @@ export class AdminController {
       </div>
       <div class="stat-card" style="--card-accent: #f59e0b;">
         <div class="stat-label">Total Player Wallets Balance</div>
-        <div class="stat-value" id="stat-balance">LKR 0.00</div>
+        <div class="stat-value" id="stat-balance">$0.00 USD</div>
       </div>
     </div>
 
@@ -934,8 +934,8 @@ export class AdminController {
           </div>
 
           <div class="form-group">
-            <label class="form-label">Credit Amount (LKR)</label>
-            <input type="number" id="credit-amount" class="form-input" placeholder="e.g. 1000" min="1" step="any" required>
+            <label class="form-label">Credit Amount ($ USD)</label>
+            <input type="number" id="credit-amount" class="form-input" placeholder="e.g. 50" min="0.1" step="any" required>
           </div>
 
           <div class="form-group">
@@ -1039,9 +1039,9 @@ export class AdminController {
         document.getElementById('stat-pending').textContent = data.pendingDeposits || 0;
         document.getElementById('pending-badge').textContent = data.pendingDeposits || 0;
         document.getElementById('stat-approved').textContent = data.approvedDeposits || 0;
-        document.getElementById('stat-volume').textContent = 'LKR ' + (data.totalDepositedAmount || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+        document.getElementById('stat-volume').textContent = '$ ' + (data.totalDepositedAmount || 0).toLocaleString(undefined, {minimumFractionDigits: 2}) + ' USD';
         document.getElementById('stat-users').textContent = data.totalUsers || 0;
-        document.getElementById('stat-balance').textContent = 'LKR ' + (data.totalSystemBalance || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+        document.getElementById('stat-balance').textContent = '$ ' + (data.totalSystemBalance || 0).toLocaleString(undefined, {minimumFractionDigits: 2}) + ' USD';
       } catch (err) {
         console.error('Failed to load stats', err);
       }
@@ -1153,10 +1153,10 @@ export class AdminController {
           <tr>
             <td style="font-weight: 700; color: #fff;">\${u.username}</td>
             <td style="font-size: 13px; color: var(--text-muted);">\${u.email || u.phoneNumber || '-'}</td>
-            <td><span style="font-weight: 600; color: #93c5fd;">\${u.currency || 'LKR'}</span></td>
+            <td><span style="font-weight: 600; color: #93c5fd;">\${u.currency || 'USD'}</span></td>
             <td>
               <span style="font-size: 15px; font-weight: 800; color: #34d399;">
-                \${u.currency || 'LKR'} \${Number(u.balance || 0).toFixed(2)}
+                \${u.currency || 'USD'} \${Number(u.balance || 0).toFixed(2)}
               </span>
             </td>
             <td>\${u.gamesPlayed || 0}</td>
@@ -1174,7 +1174,7 @@ export class AdminController {
     }
 
     async function approveDeposit(id, username, amount) {
-      if (!confirm(\`Are you sure you want to approve deposit of LKR \${amount} for player "\${username}"? Their wallet will be credited immediately.\`)) {
+      if (!confirm(\`Are you sure you want to approve deposit for player "\${username}"? Their base USD wallet will be credited immediately.\`)) {
         return;
       }
       try {
@@ -1235,7 +1235,7 @@ export class AdminController {
         });
         const data = await res.json();
         if (res.ok) {
-          showToast(\`✅ Successfully credited LKR \${amount} to \${identifier}!\`);
+          showToast(\`✅ Successfully credited $ \${amount} USD to \${identifier}!\`);
           document.getElementById('manual-credit-form').reset();
           loadAllData();
         } else {

@@ -63,8 +63,8 @@ export class GameService implements OnModuleInit {
   private currentRoundBets: LiveBet[] = [];
   private pendingRoundBots: LiveBet[] = [];
 
-  // Company virtual pool variables
-  private globalPool: number = 27215.92;
+  // Company virtual pool variables (Universal Base Currency: USD $)
+  private globalPool: number = 100.0;
   private pendingGlobalPool: number | null = null;
   private activeRealLiability: number = 0;
   private companyProfitMargin: number = 0.05; // 5%
@@ -80,16 +80,16 @@ export class GameService implements OnModuleInit {
       const savedPool = await this.redisService.get('game:global_pool');
       if (savedPool !== null && savedPool !== undefined && !isNaN(parseFloat(savedPool))) {
         this.globalPool = parseFloat(savedPool);
-        this.logger.log(`Initialized Global Pool from Redis: ${this.globalPool}`);
+        this.logger.log(`Initialized Global Pool from Redis: $${this.globalPool} USD`);
       } else {
         await this.redisService.set('game:global_pool', this.globalPool.toString());
-        this.logger.log(`Initialized Global Pool in Redis with default: ${this.globalPool}`);
+        this.logger.log(`Initialized Global Pool in Redis with default: $${this.globalPool} USD`);
       }
 
       const savedPending = await this.redisService.get('game:pending_global_pool');
       if (savedPending !== null && savedPending !== undefined && !isNaN(parseFloat(savedPending))) {
         this.pendingGlobalPool = parseFloat(savedPending);
-        this.logger.log(`Restored Pending Global Pool from Redis: ${this.pendingGlobalPool}`);
+        this.logger.log(`Restored Pending Global Pool from Redis: $${this.pendingGlobalPool} USD`);
       }
     } catch (err) {
       this.logger.warn('Failed to load global pool from Redis', err);
@@ -104,8 +104,8 @@ export class GameService implements OnModuleInit {
     }
   }
 
-  // Minimum safety floor to prevent infinite forced 1.01x crash loops
-  public static readonly MIN_POOL_FLOOR: number = 5000;
+  // Minimum safety floor to prevent infinite forced 1.01x crash loops ($20.00 USD)
+  public static readonly MIN_POOL_FLOOR: number = 20.0;
 
   public getGlobalPool(): number {
     return this.globalPool;
@@ -127,7 +127,7 @@ export class GameService implements OnModuleInit {
   }> {
     const target = parseFloat(amount.toFixed(2));
     if (target < GameService.MIN_POOL_FLOOR) {
-      throw new Error(`Cannot set pool (LKR ${target}) below minimum safety floor LKR ${GameService.MIN_POOL_FLOOR}`);
+      throw new Error(`Cannot set pool ($${target} USD) below minimum safety floor $${GameService.MIN_POOL_FLOOR} USD`);
     }
 
     // If game is actively flying (PLAYING), stage the change for the next round
@@ -140,7 +140,7 @@ export class GameService implements OnModuleInit {
         this.logger.warn('Failed to persist pending global pool to Redis', err);
       }
       this.logger.log(
-        `Global Pool update staged for NEXT ROUND: Target LKR ${target} (Active flight pool remains LKR ${this.globalPool})`,
+        `Global Pool update staged for NEXT ROUND: Target $${target} USD (Active flight pool remains $${this.globalPool} USD)`,
       );
 
       if (this.server) {
@@ -364,7 +364,7 @@ export class GameService implements OnModuleInit {
     // If a pool update was staged during the previous flight, commit it now before the new round begins!
     if (this.pendingGlobalPool !== null) {
       this.globalPool = this.pendingGlobalPool;
-      this.logger.log(`🚀 Applied staged pool to Global Pool for new round: LKR ${this.globalPool}`);
+      this.logger.log(`🚀 Applied staged pool to Global Pool for new round: $${this.globalPool} USD`);
       this.pendingGlobalPool = null;
       try {
         this.redisService.set('game:global_pool', this.globalPool.toString());

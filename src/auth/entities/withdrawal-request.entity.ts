@@ -33,7 +33,7 @@ export class WithdrawalRequest {
   @Column('decimal', { precision: 12, scale: 2 })
   amount: number;
 
-  @Column({ default: 'LKR' })
+  @Column({ default: 'USD' })
   currency: string;
 
   @Column()

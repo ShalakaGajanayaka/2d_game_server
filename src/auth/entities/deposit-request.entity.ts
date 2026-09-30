@@ -25,7 +25,7 @@ export class DepositRequest {
   @Column('decimal', { precision: 12, scale: 2 })
   amount: number;
 
-  @Column({ default: 'LKR', length: 10 })
+  @Column({ default: 'USD', length: 10 })
   currency: string;
 
   @Column()

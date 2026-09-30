@@ -138,7 +138,7 @@ export class AdminService implements OnModuleInit {
       username,
       email: email || undefined,
       amount: cleanAmount,
-      currency: (currency || 'LKR').toUpperCase(),
+      currency: (currency || 'USD').toUpperCase(),
       paymentMethod,
       referenceNumber: cleanRef,
       status: DepositStatus.PENDING,
@@ -163,28 +163,42 @@ export class AdminService implements OnModuleInit {
 
     const pendingDeposits = await this.depositRepo.count({ where: { status: DepositStatus.PENDING } });
 
-    // Only real non-marketing customer deposits contribute to Real Deposited Volume
+    // Only real non-marketing customer deposits contribute to Real Deposited Volume (Normalized to USD)
     const approvedList = await this.depositRepo.find({ where: { status: DepositStatus.APPROVED } });
     const realApprovedList = approvedList.filter((d) => !marketingUserIds.has(d.userId));
     const approvedDeposits = realApprovedList.length;
-    const totalDepositedAmount = realApprovedList.reduce((sum, d) => sum + Number(d.amount), 0);
+    const totalDepositedAmount = parseFloat(
+      realApprovedList.reduce((sum, d) => {
+        const rate = PLATFORM_EXCHANGE_RATES[(d.currency || 'USD').toUpperCase()] || 1.0;
+        return sum + (Number(d.amount) / rate);
+      }, 0).toFixed(2),
+    );
 
     const pendingWithdrawals = await this.withdrawalRepo.count({ where: { status: WithdrawalStatus.PENDING } });
-    const paidWithdrawals = await this.withdrawalRepo.count({ where: { status: WithdrawalStatus.PAID } });
-
     const paidWithdrawalList = await this.withdrawalRepo.find({ where: { status: WithdrawalStatus.PAID } });
-    const totalWithdrawnAmount = paidWithdrawalList.reduce((sum, w) => sum + Number(w.amount), 0);
+    const realPaidWithdrawals = paidWithdrawalList.filter((w) => !marketingUserIds.has(w.userId));
+    const paidWithdrawals = realPaidWithdrawals.length;
+    const totalWithdrawnAmount = parseFloat(
+      realPaidWithdrawals.reduce((sum, w) => {
+        const rate = PLATFORM_EXCHANGE_RATES[(w.currency || 'USD').toUpperCase()] || 1.0;
+        return sum + (Number(w.amount) / rate);
+      }, 0).toFixed(2),
+    );
 
-    // Only real customer wallets count toward real active system liability
-    const totalSystemBalance = realUsers.reduce((sum, u) => sum + Number(u.balance), 0);
-    const marketingSystemBalance = allUsers.filter((u) => u.isMarketing).reduce((sum, u) => sum + Number(u.balance), 0);
+    // Only real customer wallets count toward real active system liability (already in USD)
+    const totalSystemBalance = parseFloat(
+      realUsers.reduce((sum, u) => sum + Number(u.balance), 0).toFixed(2),
+    );
+    const marketingSystemBalance = parseFloat(
+      allUsers.filter((u) => u.isMarketing).reduce((sum, u) => sum + Number(u.balance), 0).toFixed(2),
+    );
     
     const globalPool = this.gameService.getGlobalPool();
     const pendingGlobalPool = this.gameService.getPendingGlobalPool();
 
-    // Company Real Net Profit: Real Customer Deposits - Real Paid Withdrawals - Real Active Player Balances
+    // Company Real Net Profit in USD ($): Real Customer Deposits - Real Paid Withdrawals - Real Active Player Balances
     const companyNetProfit = parseFloat(
-      (totalDepositedAmount - totalWithdrawnAmount - totalSystemBalance).toFixed(2)
+      (totalDepositedAmount - totalWithdrawnAmount - totalSystemBalance).toFixed(2),
     );
 
     return {
@@ -240,7 +254,7 @@ export class AdminService implements OnModuleInit {
 
     if (target < GameService.MIN_POOL_FLOOR) {
       throw new BadRequestException(
-        `Target pool (LKR ${target.toLocaleString()}) cannot be less than safety minimum LKR ${GameService.MIN_POOL_FLOOR.toLocaleString()}`
+        `Target pool ($${target.toLocaleString()} USD) cannot be less than safety minimum $${GameService.MIN_POOL_FLOOR.toLocaleString()} USD`,
       );
     }
 
@@ -301,20 +315,24 @@ export class AdminService implements OnModuleInit {
     }
 
     const depositAmount = Number(deposit.amount);
-    const prevBalance = Number(user.balance);
+    const prevBalanceUSD = Number(user.balance);
 
-    // Multi-Currency Normalization: Convert deposit currency to user's wallet currency
-    const depositCurrency = (deposit.currency || 'USD').toUpperCase();
-    const userCurrency = (user.currency || 'LKR').toUpperCase();
+    // Multi-Currency Normalization: Convert deposit currency to Universal Base USD
+    const depositCurrency = (deposit.currency || 'USDT').toUpperCase();
+    const userCurrency = (user.currency || 'USD').toUpperCase();
     const depositRate = PLATFORM_EXCHANGE_RATES[depositCurrency] || 1.0;
     const userRate = PLATFORM_EXCHANGE_RATES[userCurrency] || 1.0;
 
-    const creditedAmount = parseFloat(((depositAmount / depositRate) * userRate).toFixed(2));
-    const newBalance = parseFloat((prevBalance + creditedAmount).toFixed(2));
-    const fxRate = parseFloat((userRate / depositRate).toFixed(4));
+    // Direct USD value to credit into user.balance in database
+    const depositUSD = parseFloat((depositAmount / depositRate).toFixed(2));
+    const newBalanceUSD = parseFloat((prevBalanceUSD + depositUSD).toFixed(2));
 
-    // Atomically update user balance in PostgreSQL
-    user.balance = newBalance;
+    // Player display values
+    const creditedDisplayAmount = parseFloat((depositUSD * userRate).toFixed(2));
+    const displayBalance = parseFloat((newBalanceUSD * userRate).toFixed(2));
+
+    // Atomically update user balance in PostgreSQL (in pure USD)
+    user.balance = newBalanceUSD;
     const savedUser = await this.userRepo.save(user);
 
     // Update Redis Cache
@@ -324,8 +342,10 @@ export class AdminService implements OnModuleInit {
         username: savedUser.username,
         email: savedUser.email,
         phoneNumber: savedUser.phoneNumber,
-        currency: savedUser.currency,
-        balance: Number(savedUser.balance),
+        currency: userCurrency,
+        balance: displayBalance,
+        baseBalance: newBalanceUSD,
+        exchangeRate: userRate,
         gamesPlayed: Number(savedUser.gamesPlayed),
         totalWon: Number(savedUser.totalWon),
         bestMultiplier: Number(savedUser.bestMultiplier),
@@ -339,15 +359,15 @@ export class AdminService implements OnModuleInit {
       this.logger.warn('Failed to update user Redis cache on deposit approval', err);
     }
 
-    // Save transaction ledger entry in user's wallet currency
+    // Save transaction ledger entry in Universal Base USD
     try {
       await this.transactionRepo.save({
         userId: savedUser.id,
         type: 'DEPOSIT',
-        amount: creditedAmount,
-        multiplier: fxRate !== 1.0 ? fxRate : null,
-        balanceAfter: newBalance,
-        currency: userCurrency,
+        amount: depositUSD,
+        multiplier: depositRate !== 1.0 ? depositRate : null,
+        balanceAfter: newBalanceUSD,
+        currency: 'USD',
       });
     } catch (err) {
       this.logger.error('Failed to save deposit transaction ledger', err);
@@ -360,9 +380,9 @@ export class AdminService implements OnModuleInit {
     const savedDeposit = await this.depositRepo.save(deposit);
 
     // Notify player's active game screen in real-time via WebSocket
-    const creditMsg = depositCurrency === userCurrency
-      ? `Deposit of ${depositCurrency} ${depositAmount.toFixed(2)} approved! Your wallet has been credited. 💰`
-      : `Deposit of ${depositCurrency} ${depositAmount.toFixed(2)} approved! Credited ${userCurrency} ${creditedAmount.toFixed(2)} (Rate: 1 ${depositCurrency} = ${fxRate} ${userCurrency}) 💰`;
+    const creditMsg = userCurrency === 'USD' || userCurrency === 'USDT'
+      ? `Deposit of ${depositAmount.toFixed(2)} ${depositCurrency} approved! Credited $${depositUSD.toFixed(2)} USD to your balance. 💰`
+      : `Deposit of ${depositAmount.toFixed(2)} ${depositCurrency} approved! Credited ${userCurrency} ${creditedDisplayAmount.toFixed(2)} ($${depositUSD.toFixed(2)} USD) to your balance. 💰`;
 
     this.gameService.notifyUserBalance(
       {
@@ -370,16 +390,16 @@ export class AdminService implements OnModuleInit {
         username: savedUser.username,
         email: savedUser.email,
       },
-      newBalance,
+      displayBalance,
       creditMsg,
       userCurrency,
     );
 
-    this.logger.log(`Deposit APPROVED: ${savedDeposit.id} for ${savedUser.username} (+${savedDeposit.currency} ${depositAmount} -> +${userCurrency} ${creditedAmount}). New Balance: ${newBalance}`);
+    this.logger.log(`Deposit APPROVED: ${savedDeposit.id} for ${savedUser.username} (+${savedDeposit.currency} ${depositAmount} -> +$${depositUSD} USD). New Balance: $${newBalanceUSD} USD`);
 
     return {
       success: true,
-      message: `Deposit of ${savedDeposit.currency} ${depositAmount.toFixed(2)} approved successfully! Credited ${userCurrency} ${creditedAmount.toFixed(2)} to ${savedUser.username}.`,
+      message: `Deposit of ${savedDeposit.currency} ${depositAmount.toFixed(2)} approved successfully! Credited $${depositUSD.toFixed(2)} USD to ${savedUser.username}.`,
       user: savedUser,
       deposit: savedDeposit,
     };
@@ -407,12 +427,12 @@ export class AdminService implements OnModuleInit {
 
   async manualCredit(identifier: string, amount: number, note?: string, adminUser: string = 'Admin'): Promise<{ success: boolean; message: string; user: User }> {
     const clean = (identifier || '').trim();
-    const cleanAmount = Number(amount);
+    const cleanAmountUSD = Number(amount);
 
     if (!clean) {
       throw new BadRequestException('Please provide a username or email to credit');
     }
-    if (!cleanAmount || cleanAmount <= 0) {
+    if (!cleanAmountUSD || cleanAmountUSD <= 0) {
       throw new BadRequestException('Credit amount must be greater than zero');
     }
 
@@ -424,10 +444,15 @@ export class AdminService implements OnModuleInit {
       throw new NotFoundException(`User '${clean}' not found in database`);
     }
 
-    const prevBalance = Number(user.balance);
-    const newBalance = parseFloat((prevBalance + cleanAmount).toFixed(2));
-    user.balance = newBalance;
+    const prevBalanceUSD = Number(user.balance);
+    const newBalanceUSD = parseFloat((prevBalanceUSD + cleanAmountUSD).toFixed(2));
+    user.balance = newBalanceUSD;
     const savedUser = await this.userRepo.save(user);
+
+    const userCurrency = (savedUser.currency || 'USD').toUpperCase();
+    const userRate = PLATFORM_EXCHANGE_RATES[userCurrency] || 1.0;
+    const displayBalance = parseFloat((newBalanceUSD * userRate).toFixed(2));
+    const creditedDisplayAmount = parseFloat((cleanAmountUSD * userRate).toFixed(2));
 
     // Update Redis
     try {
@@ -436,8 +461,10 @@ export class AdminService implements OnModuleInit {
         username: savedUser.username,
         email: savedUser.email,
         phoneNumber: savedUser.phoneNumber,
-        currency: savedUser.currency,
-        balance: Number(savedUser.balance),
+        currency: userCurrency,
+        balance: displayBalance,
+        baseBalance: newBalanceUSD,
+        exchangeRate: userRate,
         gamesPlayed: Number(savedUser.gamesPlayed),
         totalWon: Number(savedUser.totalWon),
         bestMultiplier: Number(savedUser.bestMultiplier),
@@ -449,47 +476,49 @@ export class AdminService implements OnModuleInit {
       }
     } catch {}
 
-    // Record ledger transaction
+    // Record ledger transaction in USD
     try {
       await this.transactionRepo.save({
         userId: savedUser.id,
         type: 'MANUAL_DEPOSIT',
-        amount: cleanAmount,
+        amount: cleanAmountUSD,
         multiplier: null,
-        balanceAfter: newBalance,
-        currency: savedUser.currency,
+        balanceAfter: newBalanceUSD,
+        currency: 'USD',
       });
     } catch {}
 
-    // Create an approved deposit audit record
+    // Create an approved deposit audit record in USD
     try {
       await this.depositRepo.save({
         userId: savedUser.id,
         username: savedUser.username,
         email: savedUser.email || undefined,
-        amount: cleanAmount,
-        currency: savedUser.currency,
+        amount: cleanAmountUSD,
+        currency: 'USD',
         paymentMethod: 'admin_manual',
         referenceNumber: `ADMIN-${Date.now()}`,
         status: DepositStatus.APPROVED,
-        adminNote: note || 'Direct admin manual credit',
+        adminNote: note || 'Direct admin manual credit ($ USD)',
         approvedBy: adminUser,
         approvedAt: new Date(),
       });
     } catch {}
 
-    // Real-time WebSocket notify
     this.gameService.notifyUserBalance(
-      savedUser.username,
-      newBalance,
-      `Admin credited ${savedUser.currency} ${cleanAmount.toFixed(2)} to your wallet! 💰`,
+      {
+        id: savedUser.id,
+        username: savedUser.username,
+        email: savedUser.email,
+      },
+      displayBalance,
+      `🎉 Admin credited $${cleanAmountUSD.toFixed(2)} USD (+${userCurrency} ${creditedDisplayAmount.toFixed(2)}) to your wallet! 💰`,
+      userCurrency,
     );
-
-    this.logger.log(`Manual credit: ${adminUser} added ${savedUser.currency} ${cleanAmount} to ${savedUser.username}. New balance: ${newBalance}`);
 
     return {
       success: true,
-      message: `Successfully credited ${savedUser.currency} ${cleanAmount.toFixed(2)} to ${savedUser.username}!`,
+      message: `Successfully credited $${cleanAmountUSD.toFixed(2)} USD to ${savedUser.username}`,
       user: savedUser,
     };
   }
@@ -571,14 +600,17 @@ export class AdminService implements OnModuleInit {
       throw new ForbiddenException('Marketing promotional accounts are strictly restricted from real money withdrawals.');
     }
 
-    const currentBalance = Number(user.balance);
-    if (currentBalance < cleanAmount) {
-      throw new BadRequestException(`Insufficient wallet balance. Available: ${user.currency} ${currentBalance.toFixed(2)}`);
+    const currentBalanceUSD = Number(user.balance);
+    const amountUSD = parseFloat((cleanAmount / rate).toFixed(2));
+
+    if (currentBalanceUSD < amountUSD) {
+      const availableDisplay = (currentBalanceUSD * rate).toFixed(2);
+      throw new BadRequestException(`Insufficient wallet balance. Available: ${targetCurrency} ${availableDisplay}`);
     }
 
-    // Atomically hold/deduct the requested amount from active wallet balance
-    const newBalance = parseFloat((currentBalance - cleanAmount).toFixed(2));
-    user.balance = newBalance;
+    // Atomically hold/deduct the requested amount from active wallet balance in pure USD
+    const newBalanceUSD = parseFloat((currentBalanceUSD - amountUSD).toFixed(2));
+    user.balance = newBalanceUSD;
 
     if (saveDetails) {
       const currentDetails = user.savedWithdrawalDetails || {};
@@ -588,6 +620,9 @@ export class AdminService implements OnModuleInit {
 
     const savedUser = await this.userRepo.save(user);
 
+    const userRate = PLATFORM_EXCHANGE_RATES[(savedUser.currency || 'USD').toUpperCase()] || 1.0;
+    const displayBalance = parseFloat((newBalanceUSD * userRate).toFixed(2));
+
     // Update Redis
     try {
       const sanitized = {
@@ -596,7 +631,9 @@ export class AdminService implements OnModuleInit {
         email: savedUser.email,
         phoneNumber: savedUser.phoneNumber,
         currency: savedUser.currency,
-        balance: Number(savedUser.balance),
+        balance: displayBalance,
+        baseBalance: newBalanceUSD,
+        exchangeRate: userRate,
         gamesPlayed: Number(savedUser.gamesPlayed),
         totalWon: Number(savedUser.totalWon),
         bestMultiplier: Number(savedUser.bestMultiplier),
@@ -609,15 +646,15 @@ export class AdminService implements OnModuleInit {
       }
     } catch {}
 
-    // Record transaction ledger (escrow hold)
+    // Record transaction ledger (escrow hold in USD)
     try {
       await this.transactionRepo.save({
         userId: savedUser.id,
         type: 'WITHDRAWAL_ESCROW',
-        amount: -cleanAmount,
-        multiplier: null,
-        balanceAfter: newBalance,
-        currency: currency || user.currency || 'LKR',
+        amount: -amountUSD,
+        multiplier: rate !== 1.0 ? rate : null,
+        balanceAfter: newBalanceUSD,
+        currency: 'USD',
       });
     } catch (err) {
       this.logger.error('Failed to save withdrawal escrow transaction', err);
@@ -630,20 +667,21 @@ export class AdminService implements OnModuleInit {
       username: savedUser.username,
       email: email || savedUser.email || undefined,
       amount: cleanAmount,
-      currency: (currency || user.currency || 'LKR').toUpperCase(),
+      currency: targetCurrency,
       method: method || 'bank_transfer',
       payoutDetails: detailsString,
       status: WithdrawalStatus.PENDING,
     });
 
     const savedWithdrawal = await this.withdrawalRepo.save(newWithdrawal);
-    this.logger.log(`New withdrawal request: ${savedUser.username} - ${savedWithdrawal.currency} ${cleanAmount} (${method})`);
+    this.logger.log(`New withdrawal request: ${savedUser.username} - ${savedWithdrawal.currency} ${cleanAmount} ($${amountUSD} USD) (${method})`);
 
     // Notify player's active game screen of updated balance
     this.gameService.notifyUserBalance(
       savedUser.username,
-      newBalance,
+      displayBalance,
       `Withdrawal request for ${savedWithdrawal.currency} ${cleanAmount.toFixed(2)} submitted. Your wallet is held in escrow. ⏳`,
+      savedUser.currency,
     );
 
     // Broadcast real-time notification to Next.js Admin Dashboard
@@ -686,29 +724,35 @@ export class AdminService implements OnModuleInit {
 
     const savedWithdrawal = await this.withdrawalRepo.save(withdrawal);
 
-    // Record ledger finalized entry
+    // Record ledger finalized entry in base USD
+    const withdrawCurrency = (withdrawal.currency || 'USD').toUpperCase();
+    const rate = PLATFORM_EXCHANGE_RATES[withdrawCurrency] || 1.0;
+    const amountUSD = parseFloat((Number(withdrawal.amount) / rate).toFixed(2));
     try {
       await this.transactionRepo.save({
         userId: withdrawal.userId,
         type: 'WITHDRAWAL_PAID',
-        amount: -Number(withdrawal.amount),
-        multiplier: null,
+        amount: -amountUSD,
+        multiplier: rate !== 1.0 ? rate : null,
         balanceAfter: 0,
-        currency: withdrawal.currency,
+        currency: 'USD',
       });
     } catch {}
 
     // Real-time notification to player: Money has been sent!
     const user = await this.userRepo.findOne({ where: { id: withdrawal.userId } });
     if (user) {
+      const userRate = PLATFORM_EXCHANGE_RATES[(user.currency || 'USD').toUpperCase()] || 1.0;
+      const displayBal = parseFloat((Number(user.balance) * userRate).toFixed(2));
       this.gameService.notifyUserBalance(
         user.username,
-        Number(user.balance),
+        displayBal,
         `Your withdrawal of ${withdrawal.currency} ${Number(withdrawal.amount).toFixed(2)} has been transferred to your account! 💸`,
+        user.currency,
       );
     }
 
-    this.logger.log(`Withdrawal PAID: ${savedWithdrawal.id} for ${withdrawal.username} (${withdrawal.currency} ${withdrawal.amount})`);
+    this.logger.log(`Withdrawal PAID: ${savedWithdrawal.id} for ${withdrawal.username} (${withdrawal.currency} ${withdrawal.amount}) ($${amountUSD} USD)`);
 
     return {
       success: true,
@@ -736,12 +780,17 @@ export class AdminService implements OnModuleInit {
       throw new NotFoundException('User for this withdrawal was not found');
     }
 
-    // REFUND amount back to active wallet balance!
-    const refundAmount = Number(withdrawal.amount);
-    const prevBalance = Number(user.balance);
-    const newBalance = parseFloat((prevBalance + refundAmount).toFixed(2));
-    user.balance = newBalance;
+    // REFUND amount back to active wallet balance (Universal Base USD)
+    const withdrawCurrency = (withdrawal.currency || 'USD').toUpperCase();
+    const rate = PLATFORM_EXCHANGE_RATES[withdrawCurrency] || 1.0;
+    const refundUSD = parseFloat((Number(withdrawal.amount) / rate).toFixed(2));
+    const prevBalanceUSD = Number(user.balance);
+    const newBalanceUSD = parseFloat((prevBalanceUSD + refundUSD).toFixed(2));
+    user.balance = newBalanceUSD;
     const savedUser = await this.userRepo.save(user);
+
+    const userRate = PLATFORM_EXCHANGE_RATES[(savedUser.currency || 'USD').toUpperCase()] || 1.0;
+    const displayBalance = parseFloat((newBalanceUSD * userRate).toFixed(2));
 
     // Update Redis
     try {
@@ -751,7 +800,9 @@ export class AdminService implements OnModuleInit {
         email: savedUser.email,
         phoneNumber: savedUser.phoneNumber,
         currency: savedUser.currency,
-        balance: Number(savedUser.balance),
+        balance: displayBalance,
+        baseBalance: newBalanceUSD,
+        exchangeRate: userRate,
         gamesPlayed: Number(savedUser.gamesPlayed),
         totalWon: Number(savedUser.totalWon),
         bestMultiplier: Number(savedUser.bestMultiplier),
@@ -763,15 +814,15 @@ export class AdminService implements OnModuleInit {
       }
     } catch {}
 
-    // Record ledger refund
+    // Record ledger refund in USD
     try {
       await this.transactionRepo.save({
         userId: savedUser.id,
         type: 'WITHDRAWAL_REFUND',
-        amount: refundAmount,
+        amount: refundUSD,
         multiplier: null,
-        balanceAfter: newBalance,
-        currency: withdrawal.currency,
+        balanceAfter: newBalanceUSD,
+        currency: 'USD',
       });
     } catch {}
 
@@ -784,15 +835,16 @@ export class AdminService implements OnModuleInit {
     // Notify player that funds were refunded
     this.gameService.notifyUserBalance(
       savedUser.username,
-      newBalance,
-      `Withdrawal of ${withdrawal.currency} ${refundAmount.toFixed(2)} rejected (${withdrawal.adminNote}). Funds refunded to your wallet! 🔄`,
+      displayBalance,
+      `Withdrawal of ${withdrawal.currency} ${Number(withdrawal.amount).toFixed(2)} rejected (${withdrawal.adminNote}). Funds refunded to your wallet! 🔄`,
+      savedUser.currency,
     );
 
     this.logger.log(`Withdrawal REJECTED & REFUNDED: ${savedWithdrawal.id} for ${savedUser.username}`);
 
     return {
       success: true,
-      message: `Withdrawal rejected and ${withdrawal.currency} ${refundAmount.toFixed(2)} refunded to ${savedUser.username}`,
+      message: `Withdrawal rejected and ${withdrawal.currency} ${Number(withdrawal.amount).toFixed(2)} refunded to ${savedUser.username}`,
       withdrawal: savedWithdrawal,
     };
   }
@@ -819,12 +871,17 @@ export class AdminService implements OnModuleInit {
       throw new NotFoundException('User account not found');
     }
 
-    // Instantly refund escrowed amount back to playable balance
-    const refundAmount = Number(withdrawal.amount);
-    const prevBalance = Number(user.balance);
-    const newBalance = parseFloat((prevBalance + refundAmount).toFixed(2));
-    user.balance = newBalance;
+    // Instantly refund escrowed amount back to playable balance in USD
+    const withdrawCurrency = (withdrawal.currency || 'USD').toUpperCase();
+    const rate = PLATFORM_EXCHANGE_RATES[withdrawCurrency] || 1.0;
+    const refundUSD = parseFloat((Number(withdrawal.amount) / rate).toFixed(2));
+    const prevBalanceUSD = Number(user.balance);
+    const newBalanceUSD = parseFloat((prevBalanceUSD + refundUSD).toFixed(2));
+    user.balance = newBalanceUSD;
     const savedUser = await this.userRepo.save(user);
+
+    const userRate = PLATFORM_EXCHANGE_RATES[(savedUser.currency || 'USD').toUpperCase()] || 1.0;
+    const displayBalance = parseFloat((newBalanceUSD * userRate).toFixed(2));
 
     // Update Redis Cache
     try {
@@ -834,7 +891,9 @@ export class AdminService implements OnModuleInit {
         email: savedUser.email,
         phoneNumber: savedUser.phoneNumber,
         currency: savedUser.currency,
-        balance: Number(savedUser.balance),
+        balance: displayBalance,
+        baseBalance: newBalanceUSD,
+        exchangeRate: userRate,
         gamesPlayed: Number(savedUser.gamesPlayed),
         totalWon: Number(savedUser.totalWon),
         bestMultiplier: Number(savedUser.bestMultiplier),
@@ -846,15 +905,15 @@ export class AdminService implements OnModuleInit {
       }
     } catch {}
 
-    // Record Transaction Ledger Entry
+    // Record Transaction Ledger Entry in USD
     try {
       await this.transactionRepo.save({
         userId: savedUser.id,
         type: 'WITHDRAWAL_CANCEL_REFUND',
-        amount: refundAmount,
+        amount: refundUSD,
         multiplier: null,
-        balanceAfter: newBalance,
-        currency: withdrawal.currency,
+        balanceAfter: newBalanceUSD,
+        currency: 'USD',
       });
     } catch (err) {
       this.logger.error('Failed to log WITHDRAWAL_CANCEL_REFUND ledger entry', err);
@@ -870,20 +929,21 @@ export class AdminService implements OnModuleInit {
     // Notify player's active game screen in real-time via Socket.IO
     this.gameService.notifyUserBalance(
       savedUser.username,
-      newBalance,
-      `Withdrawal cancelled! ${withdrawal.currency} ${refundAmount.toFixed(2)} refunded to your balance. Ready to play! 🔄`,
+      displayBalance,
+      `Withdrawal cancelled! ${withdrawal.currency} ${Number(withdrawal.amount).toFixed(2)} refunded to your balance. Ready to play! 🔄`,
+      savedUser.currency,
     );
 
     // Notify Next.js Admin Dashboard so admin live table updates
     this.gameService.notifyNewWithdrawal(savedWithdrawal);
 
-    this.logger.log(`Withdrawal CANCELLED by player: ${savedWithdrawal.id} for ${savedUser.username} (+${withdrawal.currency} ${refundAmount.toFixed(2)})`);
+    this.logger.log(`Withdrawal CANCELLED by player: ${savedWithdrawal.id} for ${savedUser.username} (+${withdrawal.currency} ${Number(withdrawal.amount).toFixed(2)})`);
 
     return {
       success: true,
-      message: `Withdrawal cancelled! ${withdrawal.currency} ${refundAmount.toFixed(2)} has been restored to your playable wallet balance.`,
+      message: `Withdrawal cancelled! ${withdrawal.currency} ${Number(withdrawal.amount).toFixed(2)} has been restored to your playable wallet balance.`,
       withdrawal: savedWithdrawal,
-      newBalance,
+      newBalance: displayBalance,
     };
   }
 
@@ -1248,7 +1308,7 @@ export class AdminService implements OnModuleInit {
         userId: savedUser.id,
         type: action === 'RESET_ZERO' ? 'ADMIN_RESET' : (delta < 0 ? 'ADMIN_DEDUCT' : 'ADMIN_CREDIT'),
         amount: delta,
-        currency: savedUser.currency || 'LKR',
+        currency: 'USD',
         multiplier: null,
         balanceAfter: newBalance,
       });
@@ -1257,14 +1317,20 @@ export class AdminService implements OnModuleInit {
     if (!savedUser) throw new BadRequestException('Failed to adjust balance');
     const userObj: User = savedUser;
 
+    const userCurr = (userObj.currency || 'USD').toUpperCase();
+    const rate = PLATFORM_EXCHANGE_RATES[userCurr] || 1.0;
+    const displayBal = parseFloat((newBalance * rate).toFixed(2));
+
     try {
       const sanitized = {
         id: userObj.id,
         username: userObj.username,
         email: userObj.email,
         phoneNumber: userObj.phoneNumber,
-        currency: userObj.currency,
-        balance: Number(userObj.balance),
+        currency: userCurr,
+        balance: displayBal,
+        baseBalance: Number(userObj.balance),
+        exchangeRate: rate,
         gamesPlayed: Number(userObj.gamesPlayed),
         totalWon: Number(userObj.totalWon),
         bestMultiplier: Number(userObj.bestMultiplier),
@@ -1282,8 +1348,9 @@ export class AdminService implements OnModuleInit {
 
     this.gameService.notifyUserBalance(
       userObj.username,
-      newBalance,
-      `Wallet balance updated to ${userObj.currency} ${newBalance.toFixed(2)} (${reason})`,
+      displayBal,
+      `Wallet balance updated to $${newBalance.toFixed(2)} USD (${userCurr} ${displayBal.toFixed(2)}) (${reason})`,
+      userCurr,
     );
 
     this.logger.log(

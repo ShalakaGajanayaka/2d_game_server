@@ -102,7 +102,9 @@ export interface UserProfile {
   email?: string;
   phoneNumber?: string;
   currency: string;
-  balance: number;
+  balance: number; // Converted display balance for client presentation
+  baseBalance: number; // Universal base USD balance in PostgreSQL
+  exchangeRate: number; // Platform exchange rate applied against USD
   gamesPlayed: number;
   totalWon: number;
   bestMultiplier: number;
@@ -193,13 +195,20 @@ export class AuthService implements OnModuleInit {
   }
 
   private sanitizeUser(user: User): UserProfile {
+    const userCur = (user.currency || 'USD').toUpperCase();
+    const rate = PLATFORM_EXCHANGE_RATES[userCur] || 1.0;
+    const baseBal = Number(user.balance || 0);
+    const displayBal = parseFloat((baseBal * rate).toFixed(2));
+
     return {
       id: user.id,
       username: user.username,
       email: user.email || undefined,
       phoneNumber: user.phoneNumber || undefined,
-      currency: user.currency || 'USD',
-      balance: Number(user.balance),
+      currency: userCur,
+      balance: displayBal, // Seamlessly formats in user's selected currency
+      baseBalance: baseBal, // Universal USD base in database
+      exchangeRate: rate,
       gamesPlayed: Number(user.gamesPlayed),
       totalWon: Number(user.totalWon),
       bestMultiplier: Number(user.bestMultiplier),
@@ -259,7 +268,7 @@ export class AuthService implements OnModuleInit {
       throw new BadRequestException('Password must be at least 4 characters long');
     }
 
-    const cleanCurrency = (currency?.trim().toUpperCase() || 'LKR').slice(0, 10);
+    const cleanCurrency = (currency?.trim().toUpperCase() || 'USD').slice(0, 10);
     const initialWelcomeBalance = 0.0;
 
     // Auto-generate guaranteed unique username (not existing in database)
@@ -489,7 +498,8 @@ export class AuthService implements OnModuleInit {
     }
 
     const user = await this.validateUserFromToken(token);
-    const userCurrency = (user.currency || 'LKR').toUpperCase();
+    const userCurrency = (user.currency || 'USD').toUpperCase();
+    const rate = PLATFORM_EXCHANGE_RATES[userCurrency] || 1.0;
 
     let minBet = 50.0;
     let maxBet = 20000.0;
@@ -509,6 +519,12 @@ export class AuthService implements OnModuleInit {
       throw new BadRequestException(`Bet amount must be between ${minBet} and ${maxBet} ${userCurrency}`);
     }
 
+    // Convert display bet amount to Universal Base USD
+    const betAmountUSD = parseFloat((cleanAmount / rate).toFixed(2));
+    if (betAmountUSD <= 0) {
+      throw new BadRequestException('Bet amount is too low');
+    }
+
     // Phase 2: Distributed Atomic Mutex Lock
     const lockKey = `lock:bet:${user.id}:${betIndex}`;
     const acquired = await this.redisService.acquireLock(lockKey, 3);
@@ -523,7 +539,7 @@ export class AuthService implements OnModuleInit {
         throw new BadRequestException(`Bet slot ${betIndex} already has an active bet for this round`);
       }
 
-      // Phase 2: PostgreSQL ACID Transaction with Pessimistic Row Locking
+      // Phase 2: PostgreSQL ACID Transaction with Pessimistic Row Locking (Universal Base USD)
       let savedUser: User;
       await this.userRepository.manager.transaction(async (manager) => {
         const lockedUser = await manager.findOne(User, {
@@ -534,22 +550,23 @@ export class AuthService implements OnModuleInit {
           throw new UnauthorizedException('User account not found');
         }
 
-        const currentBalance = Number(lockedUser.balance);
-        if (currentBalance < cleanAmount) {
-          throw new BadRequestException('Insufficient wallet balance');
+        const currentBalanceUSD = Number(lockedUser.balance);
+        if (currentBalanceUSD < betAmountUSD) {
+          const availableDisplay = (currentBalanceUSD * rate).toFixed(2);
+          throw new BadRequestException(`Insufficient wallet balance. Available: ${userCurrency} ${availableDisplay}`);
         }
 
-        const newBalance = parseFloat((currentBalance - cleanAmount).toFixed(2));
-        lockedUser.balance = newBalance;
+        const newBalanceUSD = parseFloat((currentBalanceUSD - betAmountUSD).toFixed(2));
+        lockedUser.balance = newBalanceUSD;
         savedUser = await manager.save(lockedUser);
 
         await manager.save(Transaction, {
           userId: savedUser.id,
           type: 'BET',
-          amount: cleanAmount,
-          currency: savedUser.currency || 'USD',
+          amount: betAmountUSD,
+          currency: 'USD',
           multiplier: null,
-          balanceAfter: newBalance,
+          balanceAfter: newBalanceUSD,
         });
       });
 
@@ -560,8 +577,10 @@ export class AuthService implements OnModuleInit {
         userId: savedUser!.id,
         username: savedUser!.username,
         betIndex,
-        amount: cleanAmount,
-        currency: savedUser!.currency || 'USD',
+        amount: cleanAmount, // client display currency
+        amountUSD: betAmountUSD, // universal base USD
+        currency: userCurrency,
+        rate,
         roundStartTime: this.gameService.getStartTime(),
         placedAt: Date.now(),
       };
@@ -571,7 +590,7 @@ export class AuthService implements OnModuleInit {
       const isMarketingUser = !!savedUser!.isMarketing;
       const isMarketingAutoWin = isMarketingUser && !!savedUser!.isMarketingAutoWin;
 
-      await this.gameService.registerRealBet(cleanAmount, isMarketingUser);
+      await this.gameService.registerRealBet(betAmountUSD, isMarketingUser);
       this.gameService.addRealUserBet({
         id: betId,
         name: savedUser!.username,
@@ -598,6 +617,7 @@ export class AuthService implements OnModuleInit {
       return {
         success: true,
         balance: sanitized.balance,
+        baseBalance: sanitized.baseBalance,
         bet: betRecord,
         user: sanitized,
       };
@@ -633,7 +653,9 @@ export class AuthService implements OnModuleInit {
 
       await this.redisService.del(betKey);
       const betRecord = JSON.parse(raw);
-      const refundAmount = Number(betRecord.amount);
+      const betCurrency = betRecord.currency || user.currency || 'USD';
+      const rate = betRecord.rate || PLATFORM_EXCHANGE_RATES[betCurrency] || 1.0;
+      const refundAmountUSD = betRecord.amountUSD ? Number(betRecord.amountUSD) : parseFloat((Number(betRecord.amount) / rate).toFixed(2));
 
       // Phase 2: PostgreSQL ACID Transaction with Pessimistic Row Locking
       let savedUser: User;
@@ -646,22 +668,22 @@ export class AuthService implements OnModuleInit {
           throw new UnauthorizedException('User account not found');
         }
 
-        const newBalance = parseFloat((Number(lockedUser.balance) + refundAmount).toFixed(2));
-        lockedUser.balance = newBalance;
+        const newBalanceUSD = parseFloat((Number(lockedUser.balance) + refundAmountUSD).toFixed(2));
+        lockedUser.balance = newBalanceUSD;
         savedUser = await manager.save(lockedUser);
 
         await manager.save(Transaction, {
           userId: savedUser.id,
           type: 'CANCEL_BET',
-          amount: refundAmount,
-          currency: savedUser.currency || 'USD',
+          amount: refundAmountUSD,
+          currency: 'USD',
           multiplier: null,
-          balanceAfter: newBalance,
+          balanceAfter: newBalanceUSD,
         });
       });
 
       // Notify GameService
-      await this.gameService.cancelRealBet(refundAmount, !!savedUser!.isMarketing);
+      await this.gameService.cancelRealBet(refundAmountUSD, !!savedUser!.isMarketing);
       this.gameService.removeRealUserBet(betRecord.id);
 
       const sanitized = this.sanitizeUser(savedUser!);
@@ -672,6 +694,7 @@ export class AuthService implements OnModuleInit {
       return {
         success: true,
         balance: sanitized.balance,
+        baseBalance: sanitized.baseBalance,
         cancelledBetIndex: betIndex,
         user: sanitized,
       };
@@ -708,7 +731,10 @@ export class AuthService implements OnModuleInit {
       await this.redisService.del(betKey);
 
       const betRecord = JSON.parse(raw);
-      const betAmount = Number(betRecord.amount);
+      const betAmountDisplay = Number(betRecord.amount);
+      const betCurrency = betRecord.currency || user.currency || 'USD';
+      const rate = betRecord.rate || PLATFORM_EXCHANGE_RATES[betCurrency] || 1.0;
+      const betAmountUSD = betRecord.amountUSD ? Number(betRecord.amountUSD) : parseFloat((betAmountDisplay / rate).toFixed(2));
 
       // Authoritative multiplier check
       const currentMultiplier = parseFloat(this.gameService.getCurrentMultiplier().toFixed(2));
@@ -719,11 +745,11 @@ export class AuthService implements OnModuleInit {
         try {
           await this.betHistoryRepository.save({
             userId: user.id,
-            betAmount,
+            betAmount: betAmountUSD,
             cashOutMultiplier: null,
             crashPoint,
             winAmount: 0,
-            currency: user.currency || 'USD',
+            currency: 'USD',
           });
           await this.userRepository.increment({ id: user.id }, 'gamesPlayed', 1);
         } catch (err) {
@@ -732,9 +758,12 @@ export class AuthService implements OnModuleInit {
         throw new BadRequestException('Plane has already crashed!');
       }
 
-      // Authoritative winning calculation
-      const winAmount = parseFloat((betAmount * currentMultiplier).toFixed(2));
-      const profit = parseFloat((winAmount - betAmount).toFixed(2));
+      // Authoritative winning calculation in base USD
+      const winAmountUSD = parseFloat((betAmountUSD * currentMultiplier).toFixed(2));
+      const profitUSD = parseFloat((winAmountUSD - betAmountUSD).toFixed(2));
+
+      // Display win amount in player's local currency
+      const displayWinAmount = parseFloat((betAmountDisplay * currentMultiplier).toFixed(2));
 
       // Phase 2: PostgreSQL ACID Transaction with Pessimistic Row Locking
       let savedUser: User;
@@ -747,11 +776,11 @@ export class AuthService implements OnModuleInit {
           throw new UnauthorizedException('User account not found');
         }
 
-        const newBalance = parseFloat((Number(lockedUser.balance) + winAmount).toFixed(2));
-        lockedUser.balance = newBalance;
+        const newBalanceUSD = parseFloat((Number(lockedUser.balance) + winAmountUSD).toFixed(2));
+        lockedUser.balance = newBalanceUSD;
         lockedUser.gamesPlayed = Number(lockedUser.gamesPlayed) + 1;
-        if (profit > 0) {
-          lockedUser.totalWon = parseFloat((Number(lockedUser.totalWon) + profit).toFixed(2));
+        if (profitUSD > 0) {
+          lockedUser.totalWon = parseFloat((Number(lockedUser.totalWon) + profitUSD).toFixed(2));
         }
         if (currentMultiplier > Number(lockedUser.bestMultiplier)) {
           lockedUser.bestMultiplier = currentMultiplier;
@@ -762,25 +791,25 @@ export class AuthService implements OnModuleInit {
         await manager.save(Transaction, {
           userId: savedUser.id,
           type: 'CASHOUT',
-          amount: winAmount,
-          currency: savedUser.currency || 'USD',
+          amount: winAmountUSD,
+          currency: 'USD',
           multiplier: currentMultiplier,
-          balanceAfter: newBalance,
+          balanceAfter: newBalanceUSD,
         });
 
         await manager.save(BetHistory, {
           userId: savedUser.id,
-          betAmount,
+          betAmount: betAmountUSD,
           cashOutMultiplier: currentMultiplier,
           crashPoint,
-          winAmount,
-          currency: savedUser.currency || 'USD',
+          winAmount: winAmountUSD,
+          currency: 'USD',
         });
       });
 
       // Notify GameService liability pool & real cashout broadcast
-      await this.gameService.registerRealCashout(betAmount, winAmount, !!savedUser!.isMarketing);
-      this.gameService.markRealUserCashout(betRecord.id, currentMultiplier, winAmount);
+      await this.gameService.registerRealCashout(betAmountUSD, winAmountUSD, !!savedUser!.isMarketing);
+      this.gameService.markRealUserCashout(betRecord.id, currentMultiplier, displayWinAmount);
 
       const sanitized = this.sanitizeUser(savedUser!);
       try {
@@ -790,7 +819,9 @@ export class AuthService implements OnModuleInit {
       return {
         success: true,
         balance: sanitized.balance,
-        winAmount,
+        baseBalance: sanitized.baseBalance,
+        winAmount: displayWinAmount,
+        winAmountUSD,
         multiplier: currentMultiplier,
         betIndex,
         user: sanitized,
@@ -816,10 +847,14 @@ export class AuthService implements OnModuleInit {
       await this.redisService.del(betKey);
 
       const betRecord = JSON.parse(raw);
-      const betAmount = Number(betRecord.amount);
+      const betAmountDisplay = Number(betRecord.amount);
+      const betCurrency = betRecord.currency || 'USD';
+      const rate = betRecord.rate || PLATFORM_EXCHANGE_RATES[betCurrency] || 1.0;
+      const betAmountUSD = betRecord.amountUSD ? Number(betRecord.amountUSD) : parseFloat((betAmountDisplay / rate).toFixed(2));
       const crashPoint = this.gameService.getCrashPoint();
-      const winAmount = parseFloat((betAmount * currentMultiplier).toFixed(2));
-      const profit = parseFloat((winAmount - betAmount).toFixed(2));
+      const winAmountUSD = parseFloat((betAmountUSD * currentMultiplier).toFixed(2));
+      const profitUSD = parseFloat((winAmountUSD - betAmountUSD).toFixed(2));
+      const displayWinAmount = parseFloat((betAmountDisplay * currentMultiplier).toFixed(2));
 
       let savedUser: User | null = null;
       await this.userRepository.manager.transaction(async (manager) => {
@@ -829,11 +864,11 @@ export class AuthService implements OnModuleInit {
         });
         if (!lockedUser) return;
 
-        const newBalance = parseFloat((Number(lockedUser.balance) + winAmount).toFixed(2));
-        lockedUser.balance = newBalance;
+        const newBalanceUSD = parseFloat((Number(lockedUser.balance) + winAmountUSD).toFixed(2));
+        lockedUser.balance = newBalanceUSD;
         lockedUser.gamesPlayed = Number(lockedUser.gamesPlayed) + 1;
-        if (profit > 0) {
-          lockedUser.totalWon = parseFloat((Number(lockedUser.totalWon) + profit).toFixed(2));
+        if (profitUSD > 0) {
+          lockedUser.totalWon = parseFloat((Number(lockedUser.totalWon) + profitUSD).toFixed(2));
         }
         if (currentMultiplier > Number(lockedUser.bestMultiplier)) {
           lockedUser.bestMultiplier = currentMultiplier;
@@ -844,35 +879,37 @@ export class AuthService implements OnModuleInit {
         await manager.save(Transaction, {
           userId: savedUser.id,
           type: 'CASHOUT',
-          amount: winAmount,
-          currency: savedUser.currency || 'USD',
+          amount: winAmountUSD,
+          currency: 'USD',
           multiplier: currentMultiplier,
-          balanceAfter: newBalance,
+          balanceAfter: newBalanceUSD,
         });
 
         await manager.save(BetHistory, {
           userId: savedUser.id,
-          betAmount,
+          betAmount: betAmountUSD,
           cashOutMultiplier: currentMultiplier,
           crashPoint,
-          winAmount,
-          currency: savedUser.currency || 'USD',
+          winAmount: winAmountUSD,
+          currency: 'USD',
         });
       });
 
       if (!savedUser) return;
 
       const userObj: User = savedUser;
-      await this.gameService.registerRealCashout(betAmount, winAmount, true);
-      this.gameService.markRealUserCashout(betRecord.id, currentMultiplier, winAmount);
-      this.gameService.notifyUserBalance(userObj.username, Number(userObj.balance), `🎉 Promotional Auto-Win: +${userObj.currency} ${winAmount}`);
+      await this.gameService.registerRealCashout(betAmountUSD, winAmountUSD, true);
+      this.gameService.markRealUserCashout(betRecord.id, currentMultiplier, displayWinAmount);
+      const userRate = PLATFORM_EXCHANGE_RATES[(userObj.currency || 'USD').toUpperCase()] || 1.0;
+      const displayBal = parseFloat((Number(userObj.balance) * userRate).toFixed(2));
+      this.gameService.notifyUserBalance(userObj.username, displayBal, `🎉 Promotional Auto-Win: +${userObj.currency} ${displayWinAmount}`, userObj.currency);
 
       const sanitized = this.sanitizeUser(userObj);
       try {
         await this.redisService.set(`user:${userObj.username.toLowerCase()}`, JSON.stringify(sanitized));
       } catch {}
 
-      this.logger.log(`[Marketing Auto-Win] Successfully cashed out for ${userObj.username}: +${userObj.currency} ${winAmount} at ${currentMultiplier}x`);
+      this.logger.log(`[Marketing Auto-Win] Successfully cashed out for ${userObj.username}: +${userObj.currency} ${displayWinAmount} ($${winAmountUSD} USD) at ${currentMultiplier}x`);
     } catch (err) {
       this.logger.error(`[Marketing Auto-Win] Error executing auto cashout for user ${userId}`, err);
     } finally {
@@ -893,13 +930,16 @@ export class AuthService implements OnModuleInit {
           await this.redisService.del(key);
           if (raw) {
             const betRecord = JSON.parse(raw);
+            const betCurrency = betRecord.currency || 'USD';
+            const rate = betRecord.rate || PLATFORM_EXCHANGE_RATES[betCurrency] || 1.0;
+            const betAmountUSD = betRecord.amountUSD ? Number(betRecord.amountUSD) : parseFloat((Number(betRecord.amount) / rate).toFixed(2));
             await this.betHistoryRepository.save({
               userId: betRecord.userId,
-              betAmount: betRecord.amount,
+              betAmount: betAmountUSD,
               cashOutMultiplier: null,
               crashPoint,
               winAmount: 0,
-              currency: betRecord.currency || 'USD',
+              currency: 'USD',
             });
             await this.userRepository.increment({ id: betRecord.userId }, 'gamesPlayed', 1);
           }
@@ -1372,7 +1412,7 @@ export class AuthService implements OnModuleInit {
       throw new UnauthorizedException('User not found');
     }
 
-    const currentCurrency = (user.currency || 'LKR').toUpperCase();
+    const currentCurrency = (user.currency || 'USD').toUpperCase();
     if (currentCurrency === target) {
       throw new BadRequestException(`Your account is already set to ${target}`);
     }
@@ -1393,26 +1433,28 @@ export class AuthService implements OnModuleInit {
       throw new BadRequestException('Cannot change currency while your plane bet is active! Please cash out or wait until the flight ends.');
     }
 
-    const currentBalance = Number(user.balance || 0);
-    const { newAmount: newBalance, rate: exchangeRate } = this.convertCurrency(currentBalance, currentCurrency, target);
+    const baseBalanceUSD = Number(user.balance || 0);
+    const oldRate = PLATFORM_EXCHANGE_RATES[currentCurrency] || 1.0;
+    const newRate = PLATFORM_EXCHANGE_RATES[target] || 1.0;
+    const oldDisplayBalance = parseFloat((baseBalanceUSD * oldRate).toFixed(2));
+    const newDisplayBalance = parseFloat((baseBalanceUSD * newRate).toFixed(2));
 
-    // Atomically update user entity
+    // Base USD balance remains immutable; only presentation currency is updated
     user.currency = target;
-    user.balance = newBalance;
     const savedUser = await this.userRepository.save(user);
 
     // Record audit ledger entry
     try {
       await this.transactionRepository.save({
         userId: savedUser.id,
-        type: 'CURRENCY_CONVERSION',
-        amount: newBalance,
-        multiplier: exchangeRate,
-        balanceAfter: newBalance,
+        type: 'CURRENCY_CHANGE',
+        amount: 0,
+        multiplier: newRate,
+        balanceAfter: baseBalanceUSD,
         currency: target,
       });
     } catch (err) {
-      this.logger.warn(`Failed to record currency conversion ledger entry for ${user.username}`, err);
+      this.logger.warn(`Failed to record currency switch ledger entry for ${user.username}`, err);
     }
 
     // Sync Redis Cache
@@ -1429,12 +1471,13 @@ export class AuthService implements OnModuleInit {
     // Broadcast real-time balance update over WebSocket to game client
     this.gameService.notifyUserBalance(
       savedUser.username,
-      newBalance,
-      `Currency switched to ${target}! Converted Balance: ${target} ${newBalance.toFixed(2)}`,
+      newDisplayBalance,
+      `Currency switched to ${target}! Balance: ${target} ${newDisplayBalance.toFixed(2)}`,
+      target,
     );
 
     this.logger.log(
-      `[Currency Switch] User ${savedUser.username}: ${currentCurrency} ${currentBalance.toFixed(2)} -> ${target} ${newBalance.toFixed(2)} (Rate: ${exchangeRate})`,
+      `[Currency Switch] User ${savedUser.username}: ${currentCurrency} (${oldDisplayBalance}) -> ${target} (${newDisplayBalance}) (Base USD: $${baseBalanceUSD.toFixed(2)})`,
     );
 
     return {
@@ -1442,9 +1485,9 @@ export class AuthService implements OnModuleInit {
       user: sanitized,
       oldCurrency: currentCurrency,
       newCurrency: target,
-      oldBalance: currentBalance,
-      newBalance,
-      exchangeRate,
+      oldBalance: oldDisplayBalance,
+      newBalance: newDisplayBalance,
+      exchangeRate: newRate,
       message: `Successfully switched account currency to ${target}`,
     };
   }
