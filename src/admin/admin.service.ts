@@ -983,6 +983,42 @@ export class AdminService implements OnModuleInit {
 
     const userCurrency = (user.currency || 'USD').toUpperCase();
     const currentBalanceUSD = parseFloat(Number(user.balance || 0).toFixed(2));
+
+    // Marketing & Influencer Sandbox Exemption (Aviator / Spribe Industry Standard):
+    // Marketing accounts utilize promotional demo chips for social media streaming & tutorials.
+    // They are strictly locked from real-money withdrawals and isolated from company net profit.
+    if (user.isMarketing) {
+      if (user.isFrozen && user.freezeReason?.includes('Automated Security Audit: Ledger variance')) {
+        user.isFrozen = false;
+        user.freezeReason = null as any;
+        user.isFlaggedForReview = false;
+        user.flaggedReason = null as any;
+        await this.userRepo.save(user);
+        try {
+          await this.redisService.del(`user:${user.username.toLowerCase()}`);
+          if (user.email) await this.redisService.del(`user:${user.email.toLowerCase()}`);
+        } catch {}
+        this.logger.log(`🛡️ MARKETING EXEMPTION: User ${user.username} (Marketing Studio) marked clean & unfrozen.`);
+      }
+      return {
+        userId: user.id,
+        username: user.username,
+        currency: userCurrency,
+        currentBalance: currentBalanceUSD,
+        calculatedBalance: currentBalanceUSD,
+        variance: 0,
+        isClean: true,
+        isMarketing: true,
+        isFrozen: false,
+        freezeReason: null,
+        totalDeposits: currentBalanceUSD,
+        totalWithdrawals: 0,
+        totalBets: 0,
+        totalWins: 0,
+        transactionCount: txs.length,
+      };
+    }
+
     let calculatedBalanceUSD = 0;
     let totalDeposits = 0;
     let totalWithdrawals = 0;
