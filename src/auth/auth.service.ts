@@ -1161,8 +1161,8 @@ export class AuthService implements OnModuleInit {
       throw new BadRequestException('No account found with this email/number. Please register.');
     }
 
-    // Generate 6-digit OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    // Generate 6-digit cryptographically secure OTP (CSPRNG)
+    const otp = crypto.randomInt(100000, 1000000).toString();
 
     // Save in Redis for 5 minutes (300 seconds)
     try {
@@ -1189,7 +1189,7 @@ export class AuthService implements OnModuleInit {
     }
 
     const target = targetEmail || user.phoneNumber || user.username;
-    this.logger.log(`🔑 Password reset OTP for ${target}: [ ${otp} ] (Email sent: ${emailSent})`);
+    this.logger.log(`🔑 Password reset OTP generated for ${target} (Email sent: ${emailSent})`);
 
     const isProduction = process.env.NODE_ENV === 'production';
 
@@ -1230,6 +1230,20 @@ export class AuthService implements OnModuleInit {
       throw new BadRequestException('Account not found');
     }
 
+    // Phase 3: Brute-Force Verification Lockout (Max 3 failed verification attempts)
+    const attemptsKey = `failed_otp_attempts:${clean.toLowerCase()}`;
+    const rawAttempts = await this.redisService.get(attemptsKey);
+    const failedAttempts = rawAttempts ? parseInt(rawAttempts, 10) : 0;
+    if (failedAttempts >= 3) {
+      // Invalidate the OTP immediately to prevent continuous guessing attacks
+      await this.redisService.del(`otp:${clean.toLowerCase()}`);
+      if (user.email) await this.redisService.del(`otp:${user.email.toLowerCase()}`);
+      if (user.phoneNumber) await this.redisService.del(`otp:${user.phoneNumber}`);
+      throw new BadRequestException(
+        'Too many failed verification attempts. This verification code has been permanently invalidated. Please request a new code.',
+      );
+    }
+
     // Verify OTP against Redis
     let savedOtp: string | null = null;
     try {
@@ -1239,17 +1253,45 @@ export class AuthService implements OnModuleInit {
         (user.phoneNumber ? await this.redisService.get(`otp:${user.phoneNumber}`) : null);
     } catch {}
 
-    const isDevOverride = cleanOtp === '123456';
-    if (!isDevOverride && (!savedOtp || savedOtp !== cleanOtp)) {
-      throw new BadRequestException('Invalid or expired verification code');
+    // Constant-time secure check against saved OTP (no backdoor, no dev override)
+    let isMatch = false;
+    if (savedOtp && cleanOtp && savedOtp.length === cleanOtp.length) {
+      try {
+        const bufA = Buffer.from(savedOtp);
+        const bufB = Buffer.from(cleanOtp);
+        isMatch = crypto.timingSafeEqual(bufA, bufB);
+      } catch {
+        isMatch = false;
+      }
     }
+
+    if (!isMatch) {
+      const newAttempts = failedAttempts + 1;
+      await this.redisService.set(attemptsKey, newAttempts.toString(), 300);
+      const remaining = 3 - newAttempts;
+      if (remaining <= 0) {
+        // Purge OTP upon 3rd failed attempt
+        await this.redisService.del(`otp:${clean.toLowerCase()}`);
+        if (user.email) await this.redisService.del(`otp:${user.email.toLowerCase()}`);
+        if (user.phoneNumber) await this.redisService.del(`otp:${user.phoneNumber}`);
+        throw new BadRequestException(
+          'Maximum verification attempts exceeded. Code has been invalidated. Please request a new code.',
+        );
+      }
+      throw new BadRequestException(
+        `Invalid or expired verification code. (${remaining} attempt${remaining > 1 ? 's' : ''} remaining)`,
+      );
+    }
+
+    // Clear failed attempts counter on successful verification
+    await this.redisService.del(attemptsKey);
 
     // Hash new password and update user in PostgreSQL
     const passwordHash = await bcrypt.hash(newPassword, 10);
     user.passwordHash = passwordHash;
     const savedUser = await this.userRepository.save(user);
 
-    // Invalidate used OTP
+    // Invalidate used OTP immediately
     try {
       await this.redisService.del(`otp:${clean.toLowerCase()}`);
       if (user.email) await this.redisService.del(`otp:${user.email.toLowerCase()}`);
