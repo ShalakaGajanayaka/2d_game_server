@@ -242,6 +242,26 @@ export class AuthService implements OnModuleInit {
     return candidate;
   }
 
+  public validatePasswordStrength(password: string, fieldName = 'Password'): void {
+    if (!password || typeof password !== 'string') {
+      throw new BadRequestException(`${fieldName} is required`);
+    }
+    if (password.length < 8) {
+      throw new BadRequestException(`${fieldName} must be at least 8 characters long`);
+    }
+    if (password.length > 128) {
+      throw new BadRequestException(`${fieldName} must not exceed 128 characters`);
+    }
+    const hasUpper = /[A-Z]/.test(password);
+    const hasLower = /[a-z]/.test(password);
+    const hasDigit = /[0-9]/.test(password);
+    if (!hasUpper || !hasLower || !hasDigit) {
+      throw new BadRequestException(
+        `${fieldName} must contain at least one uppercase letter, one lowercase letter, and one number`,
+      );
+    }
+  }
+
   private sanitizeUser(user: User): UserProfile {
     const userCur = (user.currency || 'USD').toUpperCase();
     const rate = PLATFORM_EXCHANGE_RATES[userCur] || 1.0;
@@ -312,9 +332,7 @@ export class AuthService implements OnModuleInit {
       }
     }
 
-    if (!password || password.length < 4) {
-      throw new BadRequestException('Password must be at least 4 characters long');
-    }
+    this.validatePasswordStrength(password, 'Password');
 
     const cleanCurrency = (currency?.trim().toUpperCase() || 'USD').slice(0, 10);
     const initialWelcomeBalance = 0.0;
@@ -1236,9 +1254,7 @@ export class AuthService implements OnModuleInit {
     if (!cleanOtp || cleanOtp.length < 4) {
       throw new BadRequestException('Please enter the 6-digit verification code');
     }
-    if (!newPassword || newPassword.length < 4) {
-      throw new BadRequestException('New password must be at least 4 characters long');
-    }
+    this.validatePasswordStrength(newPassword, 'New password');
 
     const whereConditions: any[] = [
       { email: ILike(clean) },

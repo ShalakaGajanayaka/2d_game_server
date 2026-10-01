@@ -1,4 +1,5 @@
 import { NestFactory } from '@nestjs/core';
+import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 
@@ -10,6 +11,17 @@ async function bootstrap() {
   if (expressApp && typeof expressApp.set === 'function') {
     expressApp.set('trust proxy', 1);
   }
+
+
+
+  // Global DTO Validation Pipe
+  app.useGlobalPipes(
+    new ValidationPipe({
+      transform: true,
+      whitelist: false,
+      forbidUnknownValues: false,
+    }),
+  );
 
   // Environment-aware CORS protection
   const isProd = process.env.NODE_ENV === 'production';

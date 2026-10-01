@@ -1,5 +1,12 @@
 import { Controller, Post, Get, Body, Headers, Query, Req, UnauthorizedException, BadRequestException } from '@nestjs/common';
 import { AuthService } from './auth.service';
+import {
+  RegisterDto,
+  LoginDto,
+  RequestResetOtpDto,
+  ResetPasswordDto,
+  RenameUserDto,
+} from './dto/auth.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -22,27 +29,25 @@ export class AuthController {
   }
 
   @Post('register')
-  async register(@Body() body: { email?: string; username?: string; mobile?: string; phoneNumber?: string; password: string; currency?: string }) {
+  async register(@Body() body: RegisterDto) {
     const identifier = body.email || body.phoneNumber || body.mobile || body.username || '';
     return this.authService.register(identifier, body.password, body.currency);
   }
 
   @Post('login')
-  async login(@Body() body: { email?: string; username?: string; mobile?: string; phoneNumber?: string; password: string }) {
+  async login(@Body() body: LoginDto) {
     const identifier = body.email || body.phoneNumber || body.mobile || body.username || '';
     return this.authService.login(identifier, body.password);
   }
 
   @Post('forgot-password/request-otp')
-  async requestResetOtp(@Body() body: { email?: string; phoneNumber?: string; mobile?: string; phone?: string }) {
+  async requestResetOtp(@Body() body: RequestResetOtpDto) {
     const identifier = body.email || body.phoneNumber || body.mobile || body.phone || '';
     return this.authService.requestPasswordResetOtp(identifier);
   }
 
   @Post('forgot-password/reset')
-  async resetPassword(
-    @Body() body: { email?: string; phoneNumber?: string; mobile?: string; phone?: string; otp: string; newPassword: string },
-  ) {
+  async resetPassword(@Body() body: ResetPasswordDto) {
     const identifier = body.email || body.phoneNumber || body.mobile || body.phone || '';
     return this.authService.resetPassword(identifier, body.otp, body.newPassword);
   }
@@ -59,16 +64,13 @@ export class AuthController {
   @Post('rename')
   async renameUser(
     @Headers('authorization') authHeader: string,
-    @Body('newUsername') newUsername: string,
+    @Body() body: RenameUserDto,
   ) {
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       throw new UnauthorizedException('Bearer token missing');
     }
-    if (!newUsername || newUsername.trim().length < 3) {
-      throw new BadRequestException('Username must be at least 3 characters long');
-    }
     const token = authHeader.replace('Bearer ', '').trim();
-    return this.authService.renameUser(token, newUsername.trim());
+    return this.authService.renameUser(token, body.newUsername.trim());
   }
 
   private extractToken(authHeader?: string, bodyToken?: string): string {
