@@ -38,6 +38,18 @@ export class RedisService implements OnModuleDestroy {
     return this.redisClient.keys(pattern);
   }
 
+  async sadd(key: string, member: string): Promise<number> {
+    return this.redisClient.sadd(key, member);
+  }
+
+  async srem(key: string, member: string): Promise<number> {
+    return this.redisClient.srem(key, member);
+  }
+
+  async smembers(key: string): Promise<string[]> {
+    return this.redisClient.smembers(key);
+  }
+
   async acquireLock(key: string, ttlSeconds: number = 3): Promise<boolean> {
     const result = await this.redisClient.set(key, 'locked', 'EX', ttlSeconds, 'NX');
     return result === 'OK';

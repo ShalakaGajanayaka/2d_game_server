@@ -150,6 +150,54 @@ export class AuthService implements OnModuleInit {
     return crypto.randomBytes(24).toString('hex');
   }
 
+  private async createSession(token: string, user: User): Promise<void> {
+    const TTL = 86400 * 7; // 7 days
+    try {
+      await this.redisService.set(`token:${token}`, user.username, TTL);
+      await this.redisService.set(`token_user:${token}`, user.id, TTL);
+      await this.redisService.sadd(`user_sessions:${user.id}`, token);
+      await this.redisService.set(`user:${user.username.toLowerCase()}`, JSON.stringify(this.sanitizeUser(user)), TTL);
+      if (user.email) {
+        await this.redisService.set(`user:${user.email.toLowerCase()}`, JSON.stringify(this.sanitizeUser(user)), TTL);
+      }
+    } catch (err) {
+      this.logger.warn(`Failed to cache session in Redis for ${user.username}`, err);
+    }
+  }
+
+  async logout(token: string): Promise<{ success: boolean; message: string }> {
+    if (!token) {
+      return { success: true, message: 'Logged out successfully' };
+    }
+    try {
+      const userId = await this.redisService.get(`token_user:${token}`);
+      if (userId) {
+        await this.redisService.srem(`user_sessions:${userId}`, token);
+      }
+      await this.redisService.del(`token:${token}`);
+      await this.redisService.del(`token_user:${token}`);
+    } catch (err) {
+      this.logger.error('Error during session logout', err);
+    }
+    return { success: true, message: 'Logged out and session invalidated successfully' };
+  }
+
+  async revokeAllUserSessions(userId: string): Promise<void> {
+    try {
+      const tokens = await this.redisService.smembers(`user_sessions:${userId}`);
+      if (tokens && tokens.length > 0) {
+        for (const tok of tokens) {
+          await this.redisService.del(`token:${tok}`);
+          await this.redisService.del(`token_user:${tok}`);
+        }
+      }
+      await this.redisService.del(`user_sessions:${userId}`);
+      this.logger.log(`[Security] Revoked all ${tokens?.length || 0} active sessions for user ID: ${userId}`);
+    } catch (err) {
+      this.logger.error(`Error revoking user sessions for ${userId}`, err);
+    }
+  }
+
   private async generateUniqueUsername(): Promise<string> {
     const prefixes = [
       'Pilot',
@@ -289,17 +337,7 @@ export class AuthService implements OnModuleInit {
     const savedUser = await this.userRepository.save(newUser);
 
     const token = this.generateToken();
-
-    // Cache session and user in Redis
-    try {
-      await this.redisService.set(`token:${token}`, savedUser.username, 86400 * 7);
-      await this.redisService.set(`user:${savedUser.username.toLowerCase()}`, JSON.stringify(this.sanitizeUser(savedUser)));
-      if (savedUser.email) {
-        await this.redisService.set(`user:${savedUser.email.toLowerCase()}`, JSON.stringify(this.sanitizeUser(savedUser)));
-      }
-    } catch (err) {
-      this.logger.warn('Failed to cache user in Redis', err);
-    }
+    await this.createSession(token, savedUser);
 
     return {
       token,
@@ -392,11 +430,7 @@ export class AuthService implements OnModuleInit {
     }
 
     const token = this.generateToken();
-
-    try {
-      await this.redisService.set(`token:${token}`, user.username, 86400 * 7);
-      await this.redisService.set(`user:${user.username}`, JSON.stringify(this.sanitizeUser(user)));
-    } catch {}
+    await this.createSession(token, user);
 
     return {
       token,
@@ -980,24 +1014,11 @@ export class AuthService implements OnModuleInit {
 
   async saveBetHistory(
     token: string,
-    data: { betAmount: number; cashOutMultiplier: number | null; crashPoint: number; winAmount: number; currency: string }
+    data: any,
   ): Promise<BetHistory> {
-    const username = await this.redisService.get(`token:${token}`);
-    if (!username) throw new UnauthorizedException('Session expired');
-
-    const user = await this.userRepository.findOne({ where: { username } });
-    if (!user) throw new UnauthorizedException('User not found');
-
-    const bet = this.betHistoryRepository.create({
-      userId: user.id,
-      betAmount: data.betAmount,
-      cashOutMultiplier: data.cashOutMultiplier,
-      crashPoint: data.crashPoint,
-      winAmount: data.winAmount,
-      currency: data.currency || user.currency || 'USD',
-    });
-
-    return this.betHistoryRepository.save(bet);
+    throw new BadRequestException(
+      'Direct client-side bet history injection is permanently disabled. All game records are server-authoritative.',
+    );
   }
 
   async checkPhoneExists(phone: string): Promise<boolean> {
@@ -1298,13 +1319,11 @@ export class AuthService implements OnModuleInit {
       if (user.phoneNumber) await this.redisService.del(`otp:${user.phoneNumber}`);
     } catch {}
 
-    const token = this.generateToken();
+    // Security: Invalidate all existing sessions on other devices
+    await this.revokeAllUserSessions(user.id);
 
-    // Cache session in Redis
-    try {
-      await this.redisService.set(`token:${token}`, savedUser.username, 86400 * 7);
-      await this.redisService.set(`user:${savedUser.username.toLowerCase()}`, JSON.stringify(this.sanitizeUser(savedUser)));
-    } catch {}
+    const token = this.generateToken();
+    await this.createSession(token, savedUser);
 
     return {
       success: true,

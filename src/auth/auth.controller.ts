@@ -108,6 +108,15 @@ export class AuthController {
     return this.authService.cashoutGameBet(token, Number(body.betIndex));
   }
 
+  @Post('logout')
+  async logout(
+    @Headers('authorization') authHeader: string,
+    @Body() body?: { token?: string },
+  ) {
+    const token = this.extractToken(authHeader, body?.token);
+    return this.authService.logout(token);
+  }
+
   @Post('update-balance')
   async updateBalance(
     @Body() body: { token: string; balance: number; winDelta?: number; mult?: number },
@@ -127,13 +136,11 @@ export class AuthController {
   @Post('bet-history')
   async saveBetHistory(
     @Headers('authorization') authHeader: string,
-    @Body() body: { betAmount: number; cashOutMultiplier: number | null; crashPoint: number; winAmount: number; currency: string }
+    @Body() body: any,
   ) {
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      throw new UnauthorizedException('Bearer token missing');
-    }
-    const token = authHeader.replace('Bearer ', '').trim();
-    return this.authService.saveBetHistory(token, body);
+    throw new BadRequestException(
+      'Client-side bet history injection is permanently disabled. All game records are server-authoritative.',
+    );
   }
 
   @Get('exchange-rates')
