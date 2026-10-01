@@ -637,24 +637,32 @@ export class GameService implements OnModuleInit {
   ) {
     if (this.server) {
       const username = typeof target === 'string' ? target : (target?.username || '');
-      const email = typeof target === 'object' ? target?.email : undefined;
       const userId = typeof target === 'object' ? target?.id : undefined;
 
-      this.server.emit('userBalanceUpdated', {
+      // Privacy: Clean sanitized payload - do NOT leak email across the wire
+      const payload = {
         username,
-        email,
-        userId,
         balance,
         currency,
         message: message || 'Your wallet balance has been updated.',
         timestamp: Date.now(),
-      });
+      };
+
+      // Deliver strictly to private user rooms (No public broadcast)
+      const targetRooms = new Set<string>();
+      if (userId) targetRooms.add(`user:${userId}`);
+      if (username) targetRooms.add(`user:${username.toLowerCase()}`);
+
+      for (const room of targetRooms) {
+        this.server.to(room).emit('userBalanceUpdated', payload);
+      }
     }
   }
 
   public notifyNewDeposit(deposit: any) {
     if (this.server) {
-      this.server.emit('newDepositSubmitted', {
+      // Deliver deposit notification strictly to authorized Admin Room
+      this.server.to('admin_room').emit('newDepositSubmitted', {
         deposit,
         timestamp: Date.now(),
       });
@@ -663,7 +671,8 @@ export class GameService implements OnModuleInit {
 
   public notifyNewWithdrawal(withdrawal: any) {
     if (this.server) {
-      this.server.emit('newWithdrawalSubmitted', {
+      // Deliver withdrawal & bank account details strictly to authorized Admin Room
+      this.server.to('admin_room').emit('newWithdrawalSubmitted', {
         withdrawal,
         timestamp: Date.now(),
       });
