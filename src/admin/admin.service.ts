@@ -221,7 +221,7 @@ export class AdminService implements OnModuleInit {
 
     const pendingWithdrawals = await this.withdrawalRepo.count({ where: { status: WithdrawalStatus.PENDING } });
     const paidWithdrawalList = await this.withdrawalRepo.find({ where: { status: WithdrawalStatus.PAID } });
-    const realPaidWithdrawals = paidWithdrawalList.filter((w) => !marketingUserIds.has(w.userId));
+    const realPaidWithdrawals = paidWithdrawalList.filter((w) => !marketingUserIds.has(w.userId) && !w.isMarketing);
     const paidWithdrawals = realPaidWithdrawals.length;
     const totalWithdrawnAmount = parseFloat(
       realPaidWithdrawals.reduce((sum, w) => {
@@ -674,11 +674,7 @@ export class AdminService implements OnModuleInit {
           throw new NotFoundException('User account not found');
         }
 
-        if (lockedUser.isMarketing) {
-          throw new ForbiddenException(
-            'Marketing promotional accounts are strictly restricted from real money withdrawals.',
-          );
-        }
+        const isMarketingUser = !!lockedUser.isMarketing;
 
         const currentBalanceUSD = Number(lockedUser.balance);
         if (currentBalanceUSD < amountUSD) {
@@ -703,11 +699,11 @@ export class AdminService implements OnModuleInit {
         // Record transaction ledger (escrow hold in USD) inside same ACID transaction
         await manager.save(Transaction, {
           userId: savedUser.id,
-          type: 'WITHDRAWAL_ESCROW',
+          type: isMarketingUser ? 'PROMO_WITHDRAWAL_ESCROW' : 'WITHDRAWAL_ESCROW',
           amount: -amountUSD,
           multiplier: rate !== 1.0 ? rate : null,
           balanceAfter: newBalanceUSD,
-          currency: 'USD',
+          currency: isMarketingUser ? 'USD_DEMO' : 'USD',
         });
 
         // Create and save WithdrawalRequest record inside same ACID transaction
@@ -721,6 +717,7 @@ export class AdminService implements OnModuleInit {
           method: method || 'bank_transfer',
           payoutDetails: detailsString,
           status: WithdrawalStatus.PENDING,
+          isMarketing: isMarketingUser,
         });
 
         savedWithdrawal = await manager.save(newWithdrawal);
@@ -799,7 +796,7 @@ export class AdminService implements OnModuleInit {
     }
 
     withdrawal.status = WithdrawalStatus.PAID;
-    withdrawal.adminNote = adminNote || 'Paid to client account';
+    withdrawal.adminNote = adminNote || (withdrawal.isMarketing ? 'Simulated Demo Payout for Marketing / Video Recording' : 'Paid to client account');
     withdrawal.processedBy = adminUser;
     withdrawal.processedAt = new Date();
 
@@ -812,11 +809,11 @@ export class AdminService implements OnModuleInit {
     try {
       await this.transactionRepo.save({
         userId: withdrawal.userId,
-        type: 'WITHDRAWAL_PAID',
+        type: withdrawal.isMarketing ? 'PROMO_WITHDRAWAL_SIMULATED' : 'WITHDRAWAL_PAID',
         amount: -amountUSD,
         multiplier: rate !== 1.0 ? rate : null,
         balanceAfter: 0,
-        currency: 'USD',
+        currency: withdrawal.isMarketing ? 'USD_DEMO' : 'USD',
       });
     } catch {}
 

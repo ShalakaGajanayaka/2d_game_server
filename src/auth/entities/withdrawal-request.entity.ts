@@ -59,6 +59,9 @@ export class WithdrawalRequest {
   @Column({ nullable: true })
   processedAt?: Date;
 
+  @Column({ default: false })
+  isMarketing: boolean;
+
   @CreateDateColumn()
   createdAt: Date;
 
