@@ -339,7 +339,7 @@ export class AuthService implements OnModuleInit {
 
     this.validatePasswordStrength(password, 'Password');
 
-    const cleanCurrency = (currency?.trim().toUpperCase() || 'USD').slice(0, 10);
+    const cleanCurrency = 'USD';
     const initialWelcomeBalance = 0.0;
 
     // Auto-generate guaranteed unique username (not existing in database)
@@ -1481,50 +1481,8 @@ export class AuthService implements OnModuleInit {
       clientIp.startsWith('10.') ||
       clientIp.startsWith('172.16.');
 
-    // 1. If real public IP exists, prioritize GeoIP lookup
-    if (!isLocal) {
-      const geo = geoip.lookup(clientIp);
-      if (geo?.country) {
-        const country = geo.country.toUpperCase();
-        const currency = COUNTRY_TO_CURRENCY[country] || 'USD';
-        return { ip: clientIp, country, currency, isLocal: false, source: 'geoip' };
-      }
-    }
-
-    // 2. If local or GeoIP not found, evaluate client Timezone name
-    const cleanTz = (queryTz || '').trim().toLowerCase();
-    if (cleanTz) {
-      if (cleanTz.includes('colombo') || cleanTz.includes('sri lanka') || cleanTz.includes('srilanka')) {
-        return { ip: clientIp || '127.0.0.1', country: 'LK', currency: 'LKR', isLocal, source: 'timezone' };
-      }
-      for (const [tzKey, ctry] of Object.entries(TIMEZONE_TO_COUNTRY)) {
-        if (cleanTz.includes(tzKey)) {
-          const currency = COUNTRY_TO_CURRENCY[ctry] || 'USD';
-          return { ip: clientIp || '127.0.0.1', country: ctry, currency, isLocal, source: 'timezone' };
-        }
-      }
-    }
-
-    // 3. Evaluate client Timezone UTC offset (e.g. +330 mins = +05:30)
-    const offsetMin = queryOffset ? parseInt(queryOffset, 10) : null;
-    if (offsetMin === 330) {
-      return { ip: clientIp || '127.0.0.1', country: 'LK', currency: 'LKR', isLocal, source: 'timezone-offset' };
-    } else if (offsetMin === 345) {
-      return { ip: clientIp || '127.0.0.1', country: 'NP', currency: 'NPR', isLocal, source: 'timezone-offset' };
-    } else if (offsetMin === 360) {
-      return { ip: clientIp || '127.0.0.1', country: 'BD', currency: 'BDT', isLocal, source: 'timezone-offset' };
-    } else if (offsetMin === 300) {
-      return { ip: clientIp || '127.0.0.1', country: 'PK', currency: 'PKR', isLocal, source: 'timezone-offset' };
-    } else if (offsetMin === 240) {
-      return { ip: clientIp || '127.0.0.1', country: 'AE', currency: 'AED', isLocal, source: 'timezone-offset' };
-    } else if (offsetMin === 480) {
-      return { ip: clientIp || '127.0.0.1', country: 'SG', currency: 'SGD', isLocal, source: 'timezone-offset' };
-    } else if (offsetMin === 0) {
-      return { ip: clientIp || '127.0.0.1', country: 'GB', currency: 'GBP', isLocal, source: 'timezone-offset' };
-    }
-
-    // 4. Default fallback: Sri Lanka (LKR)
-    return { ip: clientIp || '127.0.0.1', country: 'LK', currency: 'LKR', isLocal, source: 'default' };
+    // Platform strictly operates in USD/USDT
+    return { ip: clientIp || '127.0.0.1', country: 'US', currency: 'USD', isLocal, source: 'platform_fixed' };
   }
 
   getExchangeRates(): { base: string; rates: Record<string, number> } {
@@ -1554,116 +1512,7 @@ export class AuthService implements OnModuleInit {
     return { newAmount, rate: parseFloat(effectiveRate.toFixed(4)) };
   }
 
-  async changeCurrency(token: string, targetCurrency: string): Promise<{
-    success: boolean;
-    user: UserProfile;
-    oldCurrency: string;
-    newCurrency: string;
-    oldBalance: number;
-    newBalance: number;
-    exchangeRate: number;
-    message: string;
-  }> {
-    const target = (targetCurrency || '').trim().toUpperCase();
-    if (!PLATFORM_EXCHANGE_RATES[target]) {
-      throw new BadRequestException(
-        `Unsupported target currency: ${targetCurrency}. Supported: ${Object.keys(PLATFORM_EXCHANGE_RATES).join(', ')}`,
-      );
-    }
-
-    let username: string | null = null;
-    try {
-      username = await this.redisService.get(`token:${token}`);
-    } catch {}
-
-    if (!username) {
-      throw new UnauthorizedException('Invalid or expired session');
-    }
-
-    const user = await this.userRepository.findOne({ where: { username } });
-    if (!user) {
-      throw new UnauthorizedException('User not found');
-    }
-
-    const currentCurrency = (user.currency || 'USD').toUpperCase();
-    if (currentCurrency === target) {
-      throw new BadRequestException(`Your account is already set to ${target}`);
-    }
-
-    // Cybersecurity Guard 1: Check active and queued Redis bet slots
-    try {
-      const bet1 = await this.redisService.get(`active_bet:${user.id}:1`);
-      const bet2 = await this.redisService.get(`active_bet:${user.id}:2`);
-      const qbet1 = await this.redisService.get(`queued_bet:${user.id}:1`);
-      const qbet2 = await this.redisService.get(`queued_bet:${user.id}:2`);
-      if (bet1 || bet2 || qbet1 || qbet2) {
-        throw new BadRequestException('Cannot change currency while you have an active or queued bet! Please wait until the round concludes.');
-      }
-    } catch (e) {
-      if (e instanceof BadRequestException) throw e;
-    }
-
-    // Cybersecurity Guard 2: Check in-flight game round
-    if (this.gameService.hasActiveBet(user.username)) {
-      throw new BadRequestException('Cannot change currency while your plane bet is active! Please cash out or wait until the flight ends.');
-    }
-
-    const baseBalanceUSD = Number(user.balance || 0);
-    const oldRate = PLATFORM_EXCHANGE_RATES[currentCurrency] || 1.0;
-    const newRate = PLATFORM_EXCHANGE_RATES[target] || 1.0;
-    const oldDisplayBalance = Math.round((baseBalanceUSD * oldRate) * 100) / 100;
-    const newDisplayBalance = Math.round((baseBalanceUSD * newRate) * 100) / 100;
-
-    // Base USD balance remains immutable; only presentation currency is updated
-    user.currency = target;
-    const savedUser = await this.userRepository.save(user);
-
-    // Record audit ledger entry
-    try {
-      await this.transactionRepository.save({
-        userId: savedUser.id,
-        type: 'CURRENCY_CHANGE',
-        amount: 0,
-        multiplier: newRate,
-        balanceAfter: baseBalanceUSD,
-        currency: target,
-      });
-    } catch (err) {
-      this.logger.warn(`Failed to record currency switch ledger entry for ${user.username}`, err);
-    }
-
-    // Sync Redis Cache
-    const sanitized = this.sanitizeUser(savedUser);
-    try {
-      await this.redisService.set(`user:${savedUser.username.toLowerCase()}`, JSON.stringify(sanitized));
-      if (savedUser.email) {
-        await this.redisService.set(`user:${savedUser.email.toLowerCase()}`, JSON.stringify(sanitized));
-      }
-    } catch (err) {
-      this.logger.warn('Failed to update Redis cache on currency change', err);
-    }
-
-    // Broadcast real-time balance update over WebSocket to game client
-    this.gameService.notifyUserBalance(
-      savedUser.username,
-      newDisplayBalance,
-      `Currency switched to ${target}! Balance: ${target} ${newDisplayBalance.toFixed(2)}`,
-      target,
-    );
-
-    this.logger.log(
-      `[Currency Switch] User ${savedUser.username}: ${currentCurrency} (${oldDisplayBalance}) -> ${target} (${newDisplayBalance}) (Base USD: $${baseBalanceUSD.toFixed(2)})`,
-    );
-
-    return {
-      success: true,
-      user: sanitized,
-      oldCurrency: currentCurrency,
-      newCurrency: target,
-      oldBalance: oldDisplayBalance,
-      newBalance: newDisplayBalance,
-      exchangeRate: newRate,
-      message: `Successfully switched account currency to ${target}`,
-    };
+  async changeCurrency(token: string, targetCurrency: string): Promise<any> {
+    throw new BadRequestException('Currency switching is disabled. The platform strictly operates in USD/USDT.');
   }
 }
