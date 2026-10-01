@@ -12,13 +12,13 @@ export class User {
   @Column()
   passwordHash: string;
 
-  @Column('decimal', { precision: 12, scale: 2, default: 0.0 })
+  @Column('decimal', { precision: 18, scale: 6, default: 0.0 })
   balance: number;
 
   @Column({ default: 0 })
   gamesPlayed: number;
 
-  @Column('decimal', { precision: 12, scale: 2, default: 0.0 })
+  @Column('decimal', { precision: 18, scale: 6, default: 0.0 })
   totalWon: number;
 
   @Column('decimal', { precision: 8, scale: 2, default: 1.0 })

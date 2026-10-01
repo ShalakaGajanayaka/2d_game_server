@@ -84,6 +84,7 @@ export class GameService implements OnModuleInit {
   private companyProfitMargin: number = 0.05; // 5%
 
   private crashCallbacks: Array<(crashPoint: number) => void> = [];
+  private roundStartCallbacks: Array<() => Promise<void> | void> = [];
   private activeMarketingAutoWinBets: MarketingAutoWinBet[] = [];
   private marketingAutoCashoutCallback: ((userId: string, betIndex: number, multiplier: number) => Promise<void>) | null = null;
 
@@ -327,6 +328,10 @@ export class GameService implements OnModuleInit {
     this.crashCallbacks.push(cb);
   }
 
+  public registerRoundStartCallback(cb: () => Promise<void> | void) {
+    this.roundStartCallbacks.push(cb);
+  }
+
   private generateUniqueName(index: number): string {
     const prefix = NAME_PREFIXES[Math.floor(Math.random() * NAME_PREFIXES.length)];
     const suffix = NAME_SUFFIXES[Math.floor(Math.random() * NAME_SUFFIXES.length)];
@@ -454,6 +459,16 @@ export class GameService implements OnModuleInit {
 
     this.logger.log(`Starting countdown. Initial bets: ${this.currentRoundBets.length}, Total targeted: ${allBots.length}`);
     this.broadcastState(true); // Broadcast initial state WITH initial bets
+
+    // Authoritative activation of queued bets staged during the previous flight
+    for (const cb of this.roundStartCallbacks) {
+      try {
+        const res = cb();
+        if (res instanceof Promise) res.catch(err => this.logger.error('Error executing round start async callback', err));
+      } catch (err) {
+        this.logger.error('Error executing round start callback', err);
+      }
+    }
 
     if (this.timer) clearInterval(this.timer);
     if (this.botStreamTimer) clearInterval(this.botStreamTimer);
@@ -764,6 +779,21 @@ export class GameService implements OnModuleInit {
         withdrawal,
         timestamp: Date.now(),
       });
+    }
+  }
+
+  public notifyBetActivated(userId: string, username: string, betRecord: any) {
+    if (this.server) {
+      const payload = {
+        success: true,
+        bet: betRecord,
+        betIndex: betRecord.betIndex,
+        amount: betRecord.amount,
+        currency: betRecord.currency,
+        timestamp: Date.now(),
+      };
+      if (userId) this.server.to(`user:${userId}`).emit('betActivated', payload);
+      if (username) this.server.to(`user:${username.toLowerCase()}`).emit('betActivated', payload);
     }
   }
 }

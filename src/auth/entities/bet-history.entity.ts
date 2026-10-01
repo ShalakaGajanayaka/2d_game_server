@@ -9,7 +9,7 @@ export class BetHistory {
   @Column()
   userId: string;
 
-  @Column('decimal', { precision: 12, scale: 2 })
+  @Column('decimal', { precision: 18, scale: 6 })
   betAmount: number;
 
   @Column('decimal', { precision: 8, scale: 2, nullable: true })
@@ -18,7 +18,7 @@ export class BetHistory {
   @Column('decimal', { precision: 8, scale: 2 })
   crashPoint: number;
 
-  @Column('decimal', { precision: 12, scale: 2, default: 0 })
+  @Column('decimal', { precision: 18, scale: 6, default: 0 })
   winAmount: number;
 
   @Column({ default: 'USD', length: 10 })

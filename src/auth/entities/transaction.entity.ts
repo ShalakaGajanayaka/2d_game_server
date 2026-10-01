@@ -12,13 +12,13 @@ export class Transaction {
   @Column()
   type: string; // 'BET', 'CASHOUT', 'DEPOSIT'
 
-  @Column('decimal', { precision: 12, scale: 2 })
+  @Column('decimal', { precision: 18, scale: 6 })
   amount: number;
 
   @Column('decimal', { precision: 8, scale: 2, nullable: true })
   multiplier: number | null;
 
-  @Column('decimal', { precision: 12, scale: 2 })
+  @Column('decimal', { precision: 18, scale: 6 })
   balanceAfter: number;
 
   @Column({ default: 'USD', length: 10 })

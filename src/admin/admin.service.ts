@@ -368,13 +368,13 @@ export class AdminService implements OnModuleInit {
     const depositRate = PLATFORM_EXCHANGE_RATES[depositCurrency] || 1.0;
     const userRate = PLATFORM_EXCHANGE_RATES[userCurrency] || 1.0;
 
-    // Direct USD value to credit into user.balance in database
-    const depositUSD = parseFloat((depositAmount / depositRate).toFixed(2));
-    const newBalanceUSD = parseFloat((prevBalanceUSD + depositUSD).toFixed(2));
+    // Direct USD value to credit into user.balance in database (6 decimal precision)
+    const depositUSD = parseFloat((depositAmount / depositRate).toFixed(6));
+    const newBalanceUSD = parseFloat((prevBalanceUSD + depositUSD).toFixed(6));
 
-    // Player display values
-    const creditedDisplayAmount = parseFloat((depositUSD * userRate).toFixed(2));
-    const displayBalance = parseFloat((newBalanceUSD * userRate).toFixed(2));
+    // Player display values with exact cent rounding
+    const creditedDisplayAmount = Math.round((depositUSD * userRate) * 100) / 100;
+    const displayBalance = Math.round((newBalanceUSD * userRate) * 100) / 100;
 
     // Atomically update user balance in PostgreSQL (in pure USD)
     user.balance = newBalanceUSD;
@@ -490,14 +490,14 @@ export class AdminService implements OnModuleInit {
     }
 
     const prevBalanceUSD = Number(user.balance);
-    const newBalanceUSD = parseFloat((prevBalanceUSD + cleanAmountUSD).toFixed(2));
+    const newBalanceUSD = parseFloat((prevBalanceUSD + cleanAmountUSD).toFixed(6));
     user.balance = newBalanceUSD;
     const savedUser = await this.userRepo.save(user);
 
     const userCurrency = (savedUser.currency || 'USD').toUpperCase();
     const userRate = PLATFORM_EXCHANGE_RATES[userCurrency] || 1.0;
-    const displayBalance = parseFloat((newBalanceUSD * userRate).toFixed(2));
-    const creditedDisplayAmount = parseFloat((cleanAmountUSD * userRate).toFixed(2));
+    const displayBalance = Math.round((newBalanceUSD * userRate) * 100) / 100;
+    const creditedDisplayAmount = Math.round((cleanAmountUSD * userRate) * 100) / 100;
 
     // Update Redis
     try {
@@ -630,7 +630,7 @@ export class AdminService implements OnModuleInit {
       throw new BadRequestException('Payout details are required');
     }
 
-    const amountUSD = parseFloat((cleanAmount / rate).toFixed(2));
+    const amountUSD = parseFloat((cleanAmount / rate).toFixed(6));
     if (amountUSD <= 0) {
       throw new BadRequestException('Invalid withdrawal amount');
     }
@@ -677,15 +677,19 @@ export class AdminService implements OnModuleInit {
         const isMarketingUser = !!lockedUser.isMarketing;
 
         const currentBalanceUSD = Number(lockedUser.balance);
-        if (currentBalanceUSD < amountUSD) {
-          const availableDisplay = (currentBalanceUSD * rate).toFixed(2);
+        const epsilon = 0.00001;
+        if (currentBalanceUSD + epsilon < amountUSD) {
+          const availableDisplay = Math.round((currentBalanceUSD * rate) * 100) / 100;
           throw new BadRequestException(
             `Insufficient wallet balance. Available: ${targetCurrency} ${availableDisplay}`,
           );
         }
 
         // Atomically deduct the requested amount from active wallet balance in pure USD
-        const newBalanceUSD = parseFloat((currentBalanceUSD - amountUSD).toFixed(2));
+        let newBalanceUSD = parseFloat((currentBalanceUSD - amountUSD).toFixed(6));
+        if (Math.abs(newBalanceUSD) < epsilon || newBalanceUSD < 0) {
+          newBalanceUSD = 0.0;
+        }
         lockedUser.balance = newBalanceUSD;
 
         if (saveDetails) {
@@ -724,7 +728,7 @@ export class AdminService implements OnModuleInit {
       });
 
       const userRate = PLATFORM_EXCHANGE_RATES[(savedUser!.currency || 'USD').toUpperCase()] || 1.0;
-      const displayBalance = parseFloat((Number(savedUser!.balance) * userRate).toFixed(2));
+      const displayBalance = Math.round((Number(savedUser!.balance) * userRate) * 100) / 100;
 
       // Update Redis Cache after successful database commit
       try {
@@ -883,9 +887,9 @@ export class AdminService implements OnModuleInit {
 
         const withdrawCurrency = (lockedWithdrawal.currency || 'USD').toUpperCase();
         const rate = PLATFORM_EXCHANGE_RATES[withdrawCurrency] || 1.0;
-        const refundUSD = parseFloat((Number(lockedWithdrawal.amount) / rate).toFixed(2));
+        const refundUSD = parseFloat((Number(lockedWithdrawal.amount) / rate).toFixed(6));
         const prevBalanceUSD = Number(lockedUser.balance);
-        const newBalanceUSD = parseFloat((prevBalanceUSD + refundUSD).toFixed(2));
+        const newBalanceUSD = parseFloat((prevBalanceUSD + refundUSD).toFixed(6));
         lockedUser.balance = newBalanceUSD;
         savedUser = await manager.save(lockedUser);
 
@@ -907,7 +911,7 @@ export class AdminService implements OnModuleInit {
       });
 
       const userRate = PLATFORM_EXCHANGE_RATES[(savedUser!.currency || 'USD').toUpperCase()] || 1.0;
-      const displayBalance = parseFloat((Number(savedUser!.balance) * userRate).toFixed(2));
+      const displayBalance = Math.round((Number(savedUser!.balance) * userRate) * 100) / 100;
 
       // Update Redis cache after commit
       try {
@@ -1004,9 +1008,9 @@ export class AdminService implements OnModuleInit {
 
         const withdrawCurrency = (lockedWithdrawal.currency || 'USD').toUpperCase();
         const rate = PLATFORM_EXCHANGE_RATES[withdrawCurrency] || 1.0;
-        const refundUSD = parseFloat((Number(lockedWithdrawal.amount) / rate).toFixed(2));
+        const refundUSD = parseFloat((Number(lockedWithdrawal.amount) / rate).toFixed(6));
         const prevBalanceUSD = Number(lockedUser.balance);
-        const newBalanceUSD = parseFloat((prevBalanceUSD + refundUSD).toFixed(2));
+        const newBalanceUSD = parseFloat((prevBalanceUSD + refundUSD).toFixed(6));
         lockedUser.balance = newBalanceUSD;
         savedUser = await manager.save(lockedUser);
 
@@ -1028,7 +1032,7 @@ export class AdminService implements OnModuleInit {
       });
 
       const userRate = PLATFORM_EXCHANGE_RATES[(savedUser!.currency || 'USD').toUpperCase()] || 1.0;
-      const displayBalance = parseFloat((Number(savedUser!.balance) * userRate).toFixed(2));
+      const displayBalance = Math.round((Number(savedUser!.balance) * userRate) * 100) / 100;
 
       // Update Redis Cache
       try {
