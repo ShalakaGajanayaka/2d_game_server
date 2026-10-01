@@ -31,7 +31,8 @@ export class DepositRequest {
   @Column()
   paymentMethod: string; // 'ipay', 'upay', 'bank_transfer'
 
-  @Column()
+  @Index({ unique: true })
+  @Column({ unique: true })
   referenceNumber: string;
 
   @Index()

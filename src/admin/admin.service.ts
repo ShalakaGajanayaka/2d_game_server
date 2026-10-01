@@ -118,39 +118,84 @@ export class AdminService implements OnModuleInit {
       throw new BadRequestException('Please enter a valid Transaction Reference or Slip Number');
     }
 
-    // Check duplicate reference
-    const existing = await this.depositRepo.findOne({
-      where: [
-        { referenceNumber: cleanRef, status: DepositStatus.APPROVED },
-        { referenceNumber: cleanRef, status: DepositStatus.PENDING },
-      ],
-    });
-    if (existing) {
-      if (existing.status === DepositStatus.APPROVED) {
-        throw new BadRequestException('This transaction reference has already been approved and credited');
-      } else {
-        throw new BadRequestException('A deposit request with this reference is already pending admin verification');
-      }
+    // 1. User submission throttling / spam protection (1 deposit per 3 seconds per user)
+    const userThrottleKey = `lock:deposit_user:${userId}`;
+    const userThrottleAcquired = await this.redisService.acquireLock(userThrottleKey, 3);
+    if (!userThrottleAcquired) {
+      throw new BadRequestException('Please wait a few seconds before submitting another deposit request.');
     }
 
-    const newDeposit = this.depositRepo.create({
-      userId,
-      username,
-      email: email || undefined,
-      amount: cleanAmount,
-      currency: (currency || 'USD').toUpperCase(),
-      paymentMethod,
-      referenceNumber: cleanRef,
-      status: DepositStatus.PENDING,
+    // 2. Pending deposit quota limit (maximum 3 pending deposits per user)
+    const pendingCount = await this.depositRepo.count({
+      where: { userId, status: DepositStatus.PENDING },
     });
+    if (pendingCount >= 3) {
+      throw new BadRequestException(
+        'You have 3 pending deposit requests awaiting verification. Please wait for an administrator to review them.',
+      );
+    }
 
-    const saved = await this.depositRepo.save(newDeposit);
-    this.logger.log(`New deposit request submitted: ${username} - ${saved.currency} ${saved.amount} (${paymentMethod} - ${cleanRef})`);
-    
-    // Broadcast real-time notification to Next.js Admin Dashboard
-    this.gameService.notifyNewDeposit(saved);
+    // 3. Distributed Redis Mutex on reference number to prevent concurrent race conditions
+    const refLockKey = `lock:deposit_ref:${cleanRef.toLowerCase()}`;
+    const refLockAcquired = await this.redisService.acquireLock(refLockKey, 5);
+    if (!refLockAcquired) {
+      throw new ConflictException(
+        'A deposit with this transaction reference is currently being processed. Please wait a moment.',
+      );
+    }
 
-    return saved;
+    try {
+      // 4. Comprehensive uniqueness check across ALL statuses (APPROVED, PENDING, REJECTED)
+      const existing = await this.depositRepo.findOne({
+        where: { referenceNumber: cleanRef },
+      });
+      if (existing) {
+        if (existing.status === DepositStatus.APPROVED) {
+          throw new BadRequestException('This transaction reference has already been approved and credited.');
+        } else if (existing.status === DepositStatus.PENDING) {
+          throw new BadRequestException('A deposit request with this reference is already pending admin verification.');
+        } else if (existing.status === DepositStatus.REJECTED) {
+          throw new BadRequestException(
+            'This transaction reference was previously reviewed and rejected by administrators. Replay of rejected references is prohibited.',
+          );
+        } else {
+          throw new BadRequestException('This transaction reference has already been utilized.');
+        }
+      }
+
+      const newDeposit = this.depositRepo.create({
+        userId,
+        username,
+        email: email || undefined,
+        amount: cleanAmount,
+        currency: (currency || 'USD').toUpperCase(),
+        paymentMethod,
+        referenceNumber: cleanRef,
+        status: DepositStatus.PENDING,
+      });
+
+      let saved: DepositRequest;
+      try {
+        saved = await this.depositRepo.save(newDeposit);
+      } catch (err: any) {
+        // Handle PostgreSQL unique constraint violation code 23505
+        if (err?.code === '23505') {
+          throw new ConflictException('This transaction reference has already been registered.');
+        }
+        throw err;
+      }
+
+      this.logger.log(
+        `New deposit request submitted: ${username} - ${saved.currency} ${saved.amount} (${paymentMethod} - ${cleanRef})`,
+      );
+
+      // Broadcast real-time notification strictly to Next.js Admin Dashboard Room
+      this.gameService.notifyNewDeposit(saved);
+
+      return saved;
+    } finally {
+      await this.redisService.releaseLock(refLockKey);
+    }
   }
 
   async getDashboardStats() {

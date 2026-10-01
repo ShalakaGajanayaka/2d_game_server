@@ -5,9 +5,13 @@ import {
   Body,
   Param,
   Query,
+  Req,
+  Headers,
   Res,
   UnauthorizedException,
   BadRequestException,
+  HttpException,
+  HttpStatus,
   UseGuards,
 } from '@nestjs/common';
 import { AdminService } from './admin.service';
@@ -194,7 +198,7 @@ export class AdminController {
   // -------------------------------------------------------------
 
   @Post('api/login')
-  async adminLogin(@Body() body: any) {
+  async adminLogin(@Req() req: any, @Body() body: any) {
     const adminUsername = process.env.ADMIN_USERNAME;
     const adminPassword = process.env.ADMIN_PASSWORD;
     if (!adminUsername || !adminPassword) {
@@ -206,6 +210,19 @@ export class AdminController {
       if (insecureDefaults.includes(adminPassword.trim().toLowerCase())) {
         throw new UnauthorizedException('Insecure default admin credentials detected in production environment');
       }
+    }
+
+    // Brute-force lockout protection: max 5 failed attempts per IP within 15 minutes
+    const clientIp = (req?.headers?.['cf-connecting-ip'] || req?.headers?.['x-forwarded-for'] || req?.ip || 'default_ip').toString().split(',')[0].trim();
+    const attemptsKey = `admin_lockout:${clientIp}`;
+    const attempts = await this.redisService.get(attemptsKey);
+    const failedCount = attempts ? parseInt(attempts, 10) : 0;
+
+    if (failedCount >= 5) {
+      throw new HttpException(
+        'Too many failed admin login attempts. IP temporarily locked for 15 minutes for security.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
     }
 
     const inputUser = (body.username || '').trim().toLowerCase();
@@ -226,12 +243,38 @@ export class AdminController {
     }
 
     if (userMatch && passMatch) {
+      // Clear failed attempts counter on successful login
+      await this.redisService.del(attemptsKey);
+
       const token = crypto.randomBytes(32).toString('hex');
       await this.redisService.set(`admin_token:${token}`, 'admin', 86400); // 24 hours
       return { token };
     }
 
-    throw new UnauthorizedException('Invalid credentials');
+    // Increment failed login attempt counter with 15-minute TTL (900 seconds)
+    const newCount = failedCount + 1;
+    await this.redisService.set(attemptsKey, newCount.toString(), 900);
+    const remaining = 5 - newCount;
+
+    if (remaining <= 0) {
+      throw new HttpException(
+        'Too many failed admin login attempts. IP temporarily locked for 15 minutes for security.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
+    throw new UnauthorizedException(
+      `Invalid credentials. (${remaining} attempt${remaining > 1 ? 's' : ''} remaining before 15-minute lockout)`,
+    );
+  }
+
+  @Post('api/logout')
+  async adminLogout(@Headers('authorization') authHeader: string) {
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.replace('Bearer ', '').trim();
+      await this.redisService.del(`admin_token:${token}`);
+    }
+    return { success: true, message: 'Admin session revoked successfully' };
   }
 
   @UseGuards(AdminAuthGuard)
