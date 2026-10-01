@@ -22,16 +22,25 @@ import { PoolAuditLog } from './auth/entities/pool-audit-log.entity';
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        type: 'postgres',
-        host: config.get<string>('DB_HOST', 'localhost'),
-        port: parseInt(config.get<string>('DB_PORT', '5432'), 10),
-        username: config.get<string>('DB_USER', 'postgres'),
-        password: config.get<string>('DB_PASSWORD', '12345678'),
-        database: config.get<string>('DB_NAME', 'skyrush_db'),
-        entities: [User, Transaction, DepositRequest, WithdrawalRequest, BetHistory, PoolAuditLog],
-        synchronize: true, // Auto-create tables in PostgreSQL
-      }),
+      useFactory: (config: ConfigService) => {
+        const isProd = config.get<string>('NODE_ENV') === 'production';
+        const dbPassword = config.get<string>('DB_PASSWORD');
+
+        if (isProd && (!dbPassword || dbPassword === '12345678' || dbPassword === 'postgres')) {
+          throw new Error('SECURITY FATAL: Insecure or default DB_PASSWORD configured for production environment!');
+        }
+
+        return {
+          type: 'postgres',
+          host: config.get<string>('DB_HOST', 'localhost'),
+          port: parseInt(config.get<string>('DB_PORT', '5432'), 10),
+          username: config.get<string>('DB_USER', 'postgres'),
+          password: dbPassword || (isProd ? '' : '12345678'),
+          database: config.get<string>('DB_NAME', 'skyrush_db'),
+          entities: [User, Transaction, DepositRequest, WithdrawalRequest, BetHistory, PoolAuditLog],
+          synchronize: !isProd, // Auto-create tables in non-production, disable schema alteration in prod
+        };
+      },
     }),
     ThrottlerModule.forRoot([
       {

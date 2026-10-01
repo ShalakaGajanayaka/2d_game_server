@@ -201,6 +201,13 @@ export class AdminController {
       throw new UnauthorizedException('Admin credentials not configured on server');
     }
 
+    if (process.env.NODE_ENV === 'production') {
+      const insecureDefaults = ['admin123', '12345678', 'admin', 'password', 'root'];
+      if (insecureDefaults.includes(adminPassword.trim().toLowerCase())) {
+        throw new UnauthorizedException('Insecure default admin credentials detected in production environment');
+      }
+    }
+
     const inputUser = (body.username || '').trim().toLowerCase();
     const targetUser = adminUsername.trim().toLowerCase();
     const inputPass = (body.password || '').trim();

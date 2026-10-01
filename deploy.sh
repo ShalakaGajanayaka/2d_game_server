@@ -24,17 +24,8 @@ echo "⚡ [3/8] Starting Redis..."
 systemctl start redis-server
 systemctl enable redis-server
 
-# 4. Configure PostgreSQL
-echo "🐘 [4/8] Configuring PostgreSQL Database..."
-systemctl start postgresql
-systemctl enable postgresql
-
-# Set password for postgres user and create skyrush_db if not exists
-sudo -u postgres psql -c "ALTER USER postgres PASSWORD '12345678';"
-sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = 'skyrush_db'" | grep -q 1 || sudo -u postgres psql -c "CREATE DATABASE skyrush_db;"
-
-# 5. Clone / Pull Repositories from GitHub
-echo "📁 [5/8] Cloning / Pulling source code from GitHub..."
+# 4. Clone / Pull Repositories from GitHub
+echo "📁 [4/8] Cloning / Pulling source code from GitHub..."
 mkdir -p /var/www/skyrush
 cd /var/www/skyrush
 git config --global credential.helper store
@@ -72,13 +63,23 @@ else
     git clone https://github.com/ShalakaGajanayaka/2d_game_app.git game_app
 fi
 
-# 6. Build & Launch Backend Server
-echo "🚀 [6/8] Building and Launching NestJS Backend..."
-cd /var/www/skyrush/server
+# 5. Configure Production Secrets & PostgreSQL Database
+echo "🐘 [5/8] Securing Secrets and Configuring PostgreSQL Database..."
+systemctl start postgresql
+systemctl enable postgresql
 
-if [ ! -f .env ]; then
-cat << 'EOF' > .env
+ENV_FILE="/var/www/skyrush/server/.env"
+
+# If .env does not exist, generate high-entropy cryptographic production credentials
+if [ ! -f "$ENV_FILE" ]; then
+    echo "🔐 Generating cryptographic production credentials for .env..."
+    GENERATED_DB_PASS=$(openssl rand -hex 16)
+    GENERATED_ADMIN_PASS=$(openssl rand -hex 16)
+    GENERATED_JWT_SECRET=$(openssl rand -hex 32)
+
+    cat << EOF > "$ENV_FILE"
 PORT=3000
+NODE_ENV=production
 REDIS_HOST=localhost
 REDIS_PORT=6379
 REDIS_TLS=false
@@ -86,13 +87,34 @@ REDIS_TLS=false
 DB_HOST=localhost
 DB_PORT=5432
 DB_USER=postgres
-DB_PASSWORD=12345678
+DB_PASSWORD=${GENERATED_DB_PASS}
 DB_NAME=skyrush_db
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=admin123
-ADMIN_JWT_SECRET=supersecretadminjwt_prod_key_2026
+ADMIN_USERNAME=admin@skyrush.cc
+ADMIN_PASSWORD=${GENERATED_ADMIN_PASS}
+ADMIN_JWT_SECRET=${GENERATED_JWT_SECRET}
+# RESEND_API_KEY=re_your_rotated_resend_api_key
+# EMAIL_FROM="SkyRush Security <noreply@skyrush.cc>"
 EOF
+    chmod 600 "$ENV_FILE"
+    echo "🔑 Production secrets generated and saved to $ENV_FILE (chmod 600):"
+    echo "   ADMIN_USERNAME: admin@skyrush.cc"
+    echo "   ADMIN_PASSWORD: ${GENERATED_ADMIN_PASS}"
 fi
+
+# Extract DB_PASSWORD safely from .env for PostgreSQL setup
+ACTIVE_DB_PASS=$(grep '^DB_PASSWORD=' "$ENV_FILE" | cut -d '=' -f2-)
+if [ -z "$ACTIVE_DB_PASS" ]; then
+    echo "❌ Error: DB_PASSWORD not found in $ENV_FILE"
+    exit 1
+fi
+
+sudo -u postgres psql -c "ALTER USER postgres PASSWORD '$ACTIVE_DB_PASS';"
+sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = 'skyrush_db'" | grep -q 1 || sudo -u postgres psql -c "CREATE DATABASE skyrush_db;"
+
+# 6. Build & Launch Backend Server
+echo "🚀 [6/8] Building and Launching NestJS Backend..."
+cd /var/www/skyrush/server
+chmod 600 .env 2>/dev/null || true
 
 npm install --production=false
 npm run build
