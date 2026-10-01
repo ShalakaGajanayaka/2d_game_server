@@ -560,13 +560,13 @@ export class AuthService implements OnModuleInit {
     let maxBet = 20000.0;
     if (['USD', 'USDT', 'EUR', 'GBP'].includes(userCurrency)) {
       minBet = 1.0;
-      maxBet = 500.0;
+      maxBet = 2000.0;
     } else if (userCurrency === 'AED') {
       minBet = 5.0;
-      maxBet = 2000.0;
+      maxBet = 8000.0;
     } else if (userCurrency === 'INR') {
       minBet = 20.0;
-      maxBet = 25000.0;
+      maxBet = 150000.0;
     }
 
     const cleanAmount = parseFloat(Number(amount).toFixed(2));
@@ -850,12 +850,15 @@ export class AuthService implements OnModuleInit {
         throw new BadRequestException('Plane has already crashed!');
       }
 
-      // Exact 6-decimal USD winning calculation
-      const winAmountUSD = parseFloat((betAmountUSD * currentMultiplier).toFixed(6));
+      // Exact 6-decimal USD winning calculation with Max Payout Cap ($10,000 USD Spribe Standard)
+      const MAX_PAYOUT_USD = 10000.0;
+      const rawWinUSD = parseFloat((betAmountUSD * currentMultiplier).toFixed(6));
+      const winAmountUSD = Math.min(rawWinUSD, MAX_PAYOUT_USD);
       const profitUSD = parseFloat((winAmountUSD - betAmountUSD).toFixed(6));
 
-      // Display win amount in player's local currency with exact cent rounding
-      const displayWinAmount = Math.round((betAmountDisplay * currentMultiplier) * 100) / 100;
+      // Display win amount with exact cent rounding
+      const effectiveMult = betAmountUSD > 0 ? (winAmountUSD / betAmountUSD) : currentMultiplier;
+      const displayWinAmount = Math.round((betAmountDisplay * effectiveMult) * 100) / 100;
 
       // Phase 2: PostgreSQL ACID Transaction with Pessimistic Row Locking
       let savedUser: User;
