@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Server } from 'socket.io';
+import * as crypto from 'crypto';
 import { RedisService } from '../redis/redis.service';
 
 export enum GameStatus {
@@ -63,6 +64,19 @@ export class GameService implements OnModuleInit {
   private currentRoundBets: LiveBet[] = [];
   private pendingRoundBots: LiveBet[] = [];
 
+  // Provably Fair variables (HMAC-SHA256 Stake / Roobet standard)
+  private roundNumber: number = 0;
+  private currentServerSeed: string = '';
+  private currentServerSeedHash: string = '';
+  private currentClientSeed: string = '0000000000000000000413e4592f3d37fa6104b0e32e31575e03b0c8b95da420';
+  private previousRound: {
+    roundNumber: number;
+    serverSeed: string;
+    serverSeedHash: string;
+    clientSeed: string;
+    crashPoint: number;
+  } | null = null;
+
   // Company virtual pool variables (Universal Base Currency: USD $)
   private globalPool: number = 100.0;
   private pendingGlobalPool: number | null = null;
@@ -91,8 +105,22 @@ export class GameService implements OnModuleInit {
         this.pendingGlobalPool = parseFloat(savedPending);
         this.logger.log(`Restored Pending Global Pool from Redis: $${this.pendingGlobalPool} USD`);
       }
+
+      const savedRound = await this.redisService.get('game:round_number');
+      if (savedRound !== null && savedRound !== undefined && !isNaN(parseInt(savedRound, 10))) {
+        this.roundNumber = parseInt(savedRound, 10);
+      } else {
+        this.roundNumber = 1;
+        await this.redisService.set('game:round_number', '1');
+      }
+
+      this.currentServerSeed = crypto.randomBytes(32).toString('hex');
+      this.currentServerSeedHash = crypto.createHash('sha256').update(this.currentServerSeed).digest('hex');
+      this.logger.log(
+        `Initialized Provably Fair Engine. Round #${this.roundNumber}, Seed Hash: ${this.currentServerSeedHash.slice(0, 16)}...`,
+      );
     } catch (err) {
-      this.logger.warn('Failed to load global pool from Redis', err);
+      this.logger.warn('Failed to load global pool or provably fair state from Redis', err);
     }
   }
 
@@ -386,6 +414,36 @@ export class GameService implements OnModuleInit {
     this.targetStartTime = Date.now() + 10000;
     this.currentMultiplier = 1.0;
     this.activeRealLiability = 0; // Reset for the new round
+
+    // Advance Provably Fair round commitment
+    this.roundNumber++;
+    this.currentServerSeed = crypto.randomBytes(32).toString('hex');
+    this.currentServerSeedHash = crypto.createHash('sha256').update(this.currentServerSeed).digest('hex');
+    this.crashPoint = this.calculateProvablyFairCrashPoint(
+      this.currentServerSeed,
+      this.currentClientSeed,
+      this.roundNumber,
+    );
+
+    try {
+      this.redisService.set('game:round_number', this.roundNumber.toString());
+      this.redisService.set(
+        `provably_fair:round:${this.roundNumber}:commitment`,
+        JSON.stringify({
+          roundNumber: this.roundNumber,
+          serverSeedHash: this.currentServerSeedHash,
+          clientSeed: this.currentClientSeed,
+          createdAt: Date.now(),
+        }),
+        86400 * 3,
+      );
+    } catch (err) {
+      this.logger.warn('Failed to persist Provably Fair commitment to Redis', err);
+    }
+
+    this.logger.log(
+      `[Provably Fair] Round #${this.roundNumber} committed. ServerSeedHash: ${this.currentServerSeedHash.slice(0, 16)}... | Pre-determined CrashPoint: ${this.crashPoint}x`,
+    );
     
     // Generate pool of 120 - 260 bots
     const allBots = this.generateRoundBots();
@@ -445,7 +503,10 @@ export class GameService implements OnModuleInit {
 
   private startGame() {
     this.status = GameStatus.PLAYING;
-    this.crashPoint = this.generateCrashPoint();
+    // Crash point was pre-determined and committed prior to flight
+    if (!this.crashPoint || this.crashPoint < 1.0) {
+      this.crashPoint = this.generateCrashPoint();
+    }
     this.currentMultiplier = 1.0;
     this.startTime = Date.now();
     this.flightTickCount = 0;
@@ -521,17 +582,6 @@ export class GameService implements OnModuleInit {
         }
       }
 
-      // Dynamic Liability Crash Logic (Pool-based constraint)
-      if (this.activeRealLiability > 0) {
-        const potentialPayout = this.activeRealLiability * this.currentMultiplier;
-        if (potentialPayout >= this.globalPool) {
-          this.logger.warn(`Forced Crash! Potential payout (${potentialPayout}) exceeds global pool (${this.globalPool})`);
-          this.crashPoint = this.currentMultiplier;
-          this.crash();
-          return;
-        }
-      }
-
       if (this.currentMultiplier >= this.crashPoint) {
         this.crash();
       }
@@ -543,8 +593,29 @@ export class GameService implements OnModuleInit {
     
     this.status = GameStatus.CRASHED;
     this.currentMultiplier = this.crashPoint;
+
+    // Record Provably Fair revealed outcome
+    this.previousRound = {
+      roundNumber: this.roundNumber,
+      serverSeed: this.currentServerSeed,
+      serverSeedHash: this.currentServerSeedHash,
+      clientSeed: this.currentClientSeed,
+      crashPoint: this.crashPoint,
+    };
+
+    try {
+      this.redisService.set(
+        `provably_fair:round:${this.roundNumber}:revealed`,
+        JSON.stringify(this.previousRound),
+        86400 * 7, // 7 days retention
+      );
+    } catch (err) {
+      this.logger.warn('Failed to store revealed provably fair round to Redis', err);
+    }
     
-    this.logger.log(`Crashed at ${this.crashPoint}`);
+    this.logger.log(
+      `[Provably Fair] Round #${this.roundNumber} crashed at ${this.crashPoint}x. ServerSeed revealed: ${this.currentServerSeed.slice(0, 16)}...`,
+    );
     this.broadcastState(false);
 
     // Trigger crash callbacks for authoritative round settlement
@@ -562,52 +633,63 @@ export class GameService implements OnModuleInit {
     }, 3000);
   }
 
-  private generateCrashPoint(): number {
-    // If an active marketing auto-win bet is present in this round, guarantee high-thrill multiplier (2.80x - 14.50x)
-    if (this.activeMarketingAutoWinBets.length > 0) {
-      const promoPoint = 2.80 + Math.random() * 11.70;
-      this.logger.log(`[Marketing] Active marketing auto-win bet present: set promotional crash point to ${promoPoint.toFixed(2)}x`);
-      return parseFloat(promoPoint.toFixed(2));
+  public generateCrashPoint(): number {
+    return this.calculateProvablyFairCrashPoint(
+      this.currentServerSeed,
+      this.currentClientSeed,
+      this.roundNumber,
+    );
+  }
+
+  /**
+   * Industry-Standard Provably Fair Crash Calculation (HMAC-SHA256)
+   * Compatible with Stake, Roobet, and Spribe Aviator algorithms.
+   * Return to Player (RTP): 97.00% (3.00% House Edge via 1-in-33 instant crash).
+   * 
+   * Pre-image resistant, collision resistant, mathematically deterministic,
+   * and verifiably independent of active bets or house liabilities.
+   */
+  public calculateProvablyFairCrashPoint(serverSeed: string, clientSeed: string, nonce: number): number {
+    const hmac = crypto.createHmac('sha256', serverSeed);
+    hmac.update(`${clientSeed}:${nonce}`);
+    const hash = hmac.digest('hex');
+
+    // Convert first 52 bits (13 hex characters) to integer
+    const h = parseInt(hash.slice(0, 13), 16);
+    const e = Math.pow(2, 52);
+
+    // 1 in 33 chance of instant crash at 1.00x (~3.03% house edge)
+    if (h % 33 === 0) {
+      return 1.00;
     }
 
-    // 3-Tier Bait System (When no real bets are active) - Calibrated to 32.50% (>5.00x)
-    if (this.activeRealLiability === 0) {
-      const rand = Math.random();
-      if (rand < 0.10) {
-        // 10% chance for Super FOMO (10x - 80x) -> 10.0% contribution to >5x
-        const fomoPoint = 10 + Math.random() * 70;
-        return parseFloat(fomoPoint.toFixed(2));
-      } else if (rand < 0.46) {
-        // 36% chance for Mid-Bait (2.0x - 10.0x) -> 22.5% contribution to >5x (5/8 of 36%)
-        const midPoint = 2.0 + Math.random() * 8.0;
-        return parseFloat(midPoint.toFixed(2));
-      } else {
-        // 54% chance for Normal Low (1.01x - 1.99x) -> 0% contribution to >5x
-        const lowPoint = 1.01 + Math.random() * 0.98;
-        return parseFloat(lowPoint.toFixed(2));
-      }
-    }
+    // Exponential multiplier formula
+    const rawMultiplier = (100 * e - h) / (e - h) / 100;
+    const crashPoint = Math.floor(rawMultiplier * 100) / 100;
+    return Math.max(1.01, crashPoint);
+  }
 
-    // High-Margin 30% Player Win / 70% House Edge Distribution (When real bets are active)
-    const rand = Math.random();
-    if (rand < 0.70) {
-      // 70% House Win Zone: Plane crashes early (1.00x - 1.45x)
-      // Sub-tier: 8% Instant Crash (1.00x - 1.08x) to neutralize micro-scraping bots
-      if (rand < 0.08) {
-        const instantCrash = 1.00 + Math.random() * 0.08;
-        return parseFloat(instantCrash.toFixed(2));
-      }
-      const lowPoint = 1.09 + Math.random() * 0.36; // 1.09x - 1.45x (breaks 1.50x+ targets)
-      return parseFloat(lowPoint.toFixed(2));
-    } else if (rand < 0.95) {
-      // 25% Mid Win Zone: Multiplier 1.50x - 3.80x (sustains player engagement)
-      const midPoint = 1.50 + Math.random() * 2.30;
-      return parseFloat(midPoint.toFixed(2));
-    } else {
-      // 5% High Thrill / Jackpot Zone: Multiplier 4.00x - 25.00x
-      const highPoint = 4.00 + Math.random() * 21.00;
-      return parseFloat(highPoint.toFixed(2));
+  public getProvablyFairRound() {
+    return {
+      currentRound: {
+        roundNumber: this.roundNumber,
+        serverSeedHash: this.currentServerSeedHash,
+        clientSeed: this.currentClientSeed,
+        serverSeed: this.status === GameStatus.CRASHED ? this.currentServerSeed : 'HIDDEN_UNTIL_ROUND_ENDS',
+      },
+      previousRound: this.previousRound,
+    };
+  }
+
+  public async getHistoricalRoundAudit(roundNumber: number) {
+    if (this.previousRound && this.previousRound.roundNumber === roundNumber) {
+      return this.previousRound;
     }
+    try {
+      const data = await this.redisService.get(`provably_fair:round:${roundNumber}:revealed`);
+      if (data) return JSON.parse(data);
+    } catch {}
+    return null;
   }
 
   private broadcastState(includeFullBets: boolean = true) {
@@ -626,6 +708,12 @@ export class GameService implements OnModuleInit {
       crashPoint: this.status === GameStatus.CRASHED ? this.crashPoint : null,
       serverTime: Date.now(),
       bets: includeFullBets ? this.currentRoundBets : null,
+      provablyFair: {
+        roundNumber: this.roundNumber,
+        serverSeedHash: this.currentServerSeedHash,
+        clientSeed: this.currentClientSeed,
+        serverSeed: this.status === GameStatus.CRASHED ? this.currentServerSeed : null,
+      },
     };
   }
 
