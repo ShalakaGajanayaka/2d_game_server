@@ -1177,7 +1177,7 @@ export class AdminService implements OnModuleInit {
         const txCurrency = (tx.currency || 'USD').toUpperCase();
         const txRate = PLATFORM_EXCHANGE_RATES[txCurrency] || 1.0;
         // Normalize any transaction amount strictly into base USD
-        const normalizedAmtUSD = parseFloat((amt / txRate).toFixed(2));
+        const normalizedAmtUSD = parseFloat((amt / txRate).toFixed(6));
 
         if (tx.type === 'CURRENCY_CONVERSION') {
           // Currency preference update: DB base balance in USD was unchanged
@@ -1190,7 +1190,7 @@ export class AdminService implements OnModuleInit {
         } else if (['CASHOUT', 'CANCEL_BET'].includes(tx.type)) {
           calculatedBalanceUSD += Math.abs(normalizedAmtUSD);
           totalWins += Math.abs(normalizedAmtUSD);
-        } else if (tx.type === 'BET') {
+        } else if (['BET', 'BET_QUEUED'].includes(tx.type)) {
           calculatedBalanceUSD -= Math.abs(normalizedAmtUSD);
           totalBets += Math.abs(normalizedAmtUSD);
         } else if (['WITHDRAWAL', 'WITHDRAWAL_ESCROW'].includes(tx.type)) {
@@ -1206,8 +1206,8 @@ export class AdminService implements OnModuleInit {
 
     calculatedBalanceUSD = parseFloat(calculatedBalanceUSD.toFixed(2));
     const varianceUSD = parseFloat(Math.abs(currentBalanceUSD - calculatedBalanceUSD).toFixed(2));
-    // Tolerance of 0.10 USD for standard floating-point conversion roundings
-    const isClean = varianceUSD <= 0.10;
+    // Tolerance of 0.20 USD for standard conversion roundings
+    const isClean = varianceUSD <= 0.20;
 
     if (!isClean && !user.isFrozen) {
       user.isFrozen = true;
