@@ -204,18 +204,10 @@ limit_req_zone $binary_remote_addr zone=skyrush_api:10m rate=30r/s;
 limit_req_zone $binary_remote_addr zone=skyrush_auth:10m rate=5r/s;
 limit_conn_zone $binary_remote_addr zone=skyrush_conn:10m;
 
-# 2. Strict HTTP -> HTTPS 301 Redirection (All SkyRush Domains)
+# 2. Frontend Web Game (skyrush.cc & www.skyrush.cc)
 server {
     listen 80;
     listen [::]:80;
-    server_name skyrush.cc www.skyrush.cc engine.skyrush.cc hq-ops-99.skyrush.cc;
-
-    # Enforce immediate HTTPS redirection
-    return 301 https://$host$request_uri;
-}
-
-# 3. Frontend Web Game (skyrush.cc & www.skyrush.cc)
-server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
     server_name skyrush.cc www.skyrush.cc;
@@ -277,8 +269,10 @@ server {
     }
 }
 
-# 4. Game Engine Realtime Backend (engine.skyrush.cc)
+# 3. Game Engine Realtime Backend (engine.skyrush.cc)
 server {
+    listen 80;
+    listen [::]:80;
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
     server_name engine.skyrush.cc;
@@ -317,8 +311,10 @@ server {
     }
 }
 
-# 5. Secret Admin Mission Control (hq-ops-99.skyrush.cc)
+# 4. Secret Admin Mission Control (hq-ops-99.skyrush.cc)
 server {
+    listen 80;
+    listen [::]:80;
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
     server_name hq-ops-99.skyrush.cc;
@@ -353,7 +349,7 @@ server {
     }
 }
 
-# 6. Origin Shield & Port-Scan Drop (Catch-all for direct IP scans on HTTP & HTTPS)
+# 5. Origin Shield & Port-Scan Drop (Catch-all for direct IP scans on HTTP & HTTPS)
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
