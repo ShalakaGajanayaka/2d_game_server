@@ -9,7 +9,7 @@ echo "=========================================================="
 echo "📦 [1/8] Updating system packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y curl wget git build-essential ufw nginx postgresql postgresql-contrib redis-server unzip
+apt-get install -y curl wget git build-essential ufw nginx postgresql postgresql-contrib redis-server unzip certbot python3-certbot-nginx
 
 # 2. Install Node.js 20 LTS and PM2
 echo "📦 [2/8] Installing Node.js 20 LTS and PM2..."
@@ -164,27 +164,66 @@ BUILD_TS=$(date +%s)
 sed -i "s/main\.dart\.js/main.dart.js?v=$BUILD_TS/g" /var/www/skyrush/game_web/flutter_bootstrap.js
 sed -i "s/flutter_bootstrap\.js/flutter_bootstrap.js?v=$BUILD_TS/g" /var/www/skyrush/game_web/index.html
 
-# Configure Nginx Reverse Proxy with Virtual Hosts & Security Hardening
+# Configure SSL Certificate Fallback (Cloudflare Origin CA or Self-Signed)
+mkdir -p /etc/ssl/skyrush
+if [ ! -f /etc/ssl/skyrush/certificate.crt ] || [ ! -f /etc/ssl/skyrush/private.key ]; then
+    echo "🔐 Provisioning initial TLS/SSL certificate in /etc/ssl/skyrush/..."
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout /etc/ssl/skyrush/private.key \
+        -out /etc/ssl/skyrush/certificate.crt \
+        -subj "/C=US/ST=Nevada/L=Las Vegas/O=SkyRush Gaming/CN=*.skyrush.cc"
+    chmod 600 /etc/ssl/skyrush/private.key
+    echo "ℹ️ Tip: For Cloudflare Full (Strict) SSL, paste your Cloudflare Origin Certificate into /etc/ssl/skyrush/certificate.crt and Key into /etc/ssl/skyrush/private.key"
+fi
+
+# Configure Nginx Reverse Proxy with Virtual Hosts & High-Security Hardening
 cat << 'EOF' > /etc/nginx/sites-available/default
 # ==========================================================
-# SKYRUSH PRODUCTION SECURITY HARDENED NGINX CONFIGURATION
+# SKYRUSH HIGH-SECURITY PRODUCTION NGINX CONFIGURATION
 # ==========================================================
 server_tokens off;
 
-# 1. Frontend Web Game (skyrush.cc & www.skyrush.cc)
+# 1. Anti-DDoS & Brute-Force Rate Limiting Zones
+limit_req_zone $binary_remote_addr zone=skyrush_api:10m rate=30r/s;
+limit_req_zone $binary_remote_addr zone=skyrush_auth:10m rate=5r/s;
+limit_conn_zone $binary_remote_addr zone=skyrush_conn:10m;
+
+# 2. Strict HTTP -> HTTPS 301 Redirection (All SkyRush Domains)
 server {
     listen 80;
     listen [::]:80;
+    server_name skyrush.cc www.skyrush.cc engine.skyrush.cc hq-ops-99.skyrush.cc;
+
+    # Enforce immediate HTTPS redirection
+    return 301 https://$host$request_uri;
+}
+
+# 3. Frontend Web Game (skyrush.cc & www.skyrush.cc)
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
     server_name skyrush.cc www.skyrush.cc;
 
     root /var/www/skyrush/game_web;
     index index.html;
 
-    # Security Headers
+    # TLS / SSL Configuration
+    ssl_certificate /etc/ssl/skyrush/certificate.crt;
+    ssl_certificate_key /etc/ssl/skyrush/private.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384';
+    ssl_session_cache shared:SSL:20m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # High-Security Response Headers (HSTS, Anti-Clickjacking, MIME Sniffing)
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
 
     # Aggressive No-Cache for iOS Web Clip & PWA entry points
     location ~* (index\.html|manifest\.json)$ {
@@ -197,6 +236,7 @@ server {
     }
 
     location /socket.io/ {
+        limit_conn skyrush_conn 30;
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -204,32 +244,49 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
     }
 
     location /auth/ {
+        limit_req zone=skyrush_auth burst=10 nodelay;
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto https;
     }
 }
 
-# 2. Game Engine Realtime Backend (engine.skyrush.cc)
+# 4. Game Engine Realtime Backend (engine.skyrush.cc)
 server {
-    listen 80;
-    listen [::]:80;
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
     server_name engine.skyrush.cc;
 
+    # TLS / SSL Configuration
+    ssl_certificate /etc/ssl/skyrush/certificate.crt;
+    ssl_certificate_key /etc/ssl/skyrush/private.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384';
+    ssl_session_cache shared:SSL:20m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
     # Security Headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
     location / {
+        limit_req zone=skyrush_api burst=50 nodelay;
+        limit_conn skyrush_conn 50;
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -237,26 +294,38 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto https;
         proxy_buffering off;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
     }
 }
 
-# 3. Secret Admin Mission Control (hq-ops-99.skyrush.cc)
+# 5. Secret Admin Mission Control (hq-ops-99.skyrush.cc)
 server {
-    listen 80;
-    listen [::]:80;
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
     server_name hq-ops-99.skyrush.cc;
 
+    # TLS / SSL Configuration
+    ssl_certificate /etc/ssl/skyrush/certificate.crt;
+    ssl_certificate_key /etc/ssl/skyrush/private.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384';
+    ssl_session_cache shared:SSL:20m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
     # Security Headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
     location / {
+        limit_req zone=skyrush_api burst=30 nodelay;
         proxy_pass http://127.0.0.1:3001;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -264,16 +333,21 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto https;
     }
 }
 
-# 4. Origin Shield & Port-Scan Drop (Catch-all for raw IP scans & unauthorized hosts)
+# 6. Origin Shield & Port-Scan Drop (Catch-all for direct IP scans on HTTP & HTTPS)
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
     server_name _;
     server_tokens off;
+
+    ssl_certificate /etc/ssl/skyrush/certificate.crt;
+    ssl_certificate_key /etc/ssl/skyrush/private.key;
 
     # Instantly drop direct IP scans, botnets, and unmapped Host headers
     return 444;

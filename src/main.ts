@@ -11,9 +11,34 @@ async function bootstrap() {
     expressApp.set('trust proxy', 1);
   }
 
-  // Enable CORS for Flutter Web / any origin
+  // Environment-aware CORS protection
+  const isProd = process.env.NODE_ENV === 'production';
+  const customOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((o) => o.trim().toLowerCase())
+    .filter(Boolean);
+
   app.enableCors({
-    origin: true,
+    origin: (origin, callback) => {
+      // Allow non-browser requests (mobile apps, curl, server-to-server)
+      if (!origin) return callback(null, true);
+
+      if (!isProd) {
+        return callback(null, true);
+      }
+
+      const lower = origin.toLowerCase();
+      const isAllowedDomain =
+        lower.endsWith('.skyrush.cc') ||
+        lower === 'https://skyrush.cc' ||
+        customOrigins.includes(lower);
+
+      if (isAllowedDomain) {
+        callback(null, true);
+      } else {
+        callback(new Error(`Origin ${origin} not permitted by SkyRush CORS policy`));
+      }
+    },
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     credentials: true,
     allowedHeaders: 'Content-Type, Accept, Authorization',
