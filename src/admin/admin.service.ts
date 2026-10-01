@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException, ConflictException, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike } from 'typeorm';
 import { User } from '../auth/entities/user.entity';
@@ -585,109 +585,145 @@ export class AdminService implements OnModuleInit {
       throw new BadRequestException('Payout details are required');
     }
 
-    if (this.gameService.hasActiveBet(username)) {
-      throw new BadRequestException(
-        'Cannot request a withdrawal while you have an active bet in flight! Please cash out or wait for the round to conclude.',
+    const amountUSD = parseFloat((cleanAmount / rate).toFixed(2));
+    if (amountUSD <= 0) {
+      throw new BadRequestException('Invalid withdrawal amount');
+    }
+
+    // Tier 1: Distributed Mutex Lock (Fail-fast memory lock in Redis)
+    const lockKey = `lock:wallet:${userId}`;
+    const acquired = await this.redisService.acquireLock(lockKey, 5);
+    if (!acquired) {
+      throw new ConflictException(
+        'A wallet transaction is already in progress. Please wait a moment and try again.',
       );
     }
 
-    const user = await this.userRepo.findOne({ where: [{ id: userId }, { username }] });
-    if (!user) {
-      throw new NotFoundException('User account not found');
-    }
-
-    if (user.isMarketing) {
-      throw new ForbiddenException('Marketing promotional accounts are strictly restricted from real money withdrawals.');
-    }
-
-    const currentBalanceUSD = Number(user.balance);
-    const amountUSD = parseFloat((cleanAmount / rate).toFixed(2));
-
-    if (currentBalanceUSD < amountUSD) {
-      const availableDisplay = (currentBalanceUSD * rate).toFixed(2);
-      throw new BadRequestException(`Insufficient wallet balance. Available: ${targetCurrency} ${availableDisplay}`);
-    }
-
-    // Atomically hold/deduct the requested amount from active wallet balance in pure USD
-    const newBalanceUSD = parseFloat((currentBalanceUSD - amountUSD).toFixed(2));
-    user.balance = newBalanceUSD;
-
-    if (saveDetails) {
-      const currentDetails = user.savedWithdrawalDetails || {};
-      currentDetails[method] = payoutDetails;
-      user.savedWithdrawalDetails = { ...currentDetails };
-    }
-
-    const savedUser = await this.userRepo.save(user);
-
-    const userRate = PLATFORM_EXCHANGE_RATES[(savedUser.currency || 'USD').toUpperCase()] || 1.0;
-    const displayBalance = parseFloat((newBalanceUSD * userRate).toFixed(2));
-
-    // Update Redis
     try {
-      const sanitized = {
-        id: savedUser.id,
-        username: savedUser.username,
-        email: savedUser.email,
-        phoneNumber: savedUser.phoneNumber,
-        currency: savedUser.currency,
-        balance: displayBalance,
-        baseBalance: newBalanceUSD,
-        exchangeRate: userRate,
-        gamesPlayed: Number(savedUser.gamesPlayed),
-        totalWon: Number(savedUser.totalWon),
-        bestMultiplier: Number(savedUser.bestMultiplier),
-        createdAt: savedUser.createdAt ? new Date(savedUser.createdAt).getTime() : Date.now(),
-        savedWithdrawalDetails: savedUser.savedWithdrawalDetails,
-      };
-      await this.redisService.set(`user:${savedUser.username.toLowerCase()}`, JSON.stringify(sanitized));
-      if (savedUser.email) {
-        await this.redisService.set(`user:${savedUser.email.toLowerCase()}`, JSON.stringify(sanitized));
+      if (this.gameService.hasActiveBet(username)) {
+        throw new BadRequestException(
+          'Cannot request a withdrawal while you have an active bet in flight! Please cash out or wait for the round to conclude.',
+        );
       }
-    } catch {}
 
-    // Record transaction ledger (escrow hold in USD)
-    try {
-      await this.transactionRepo.save({
-        userId: savedUser.id,
-        type: 'WITHDRAWAL_ESCROW',
-        amount: -amountUSD,
-        multiplier: rate !== 1.0 ? rate : null,
-        balanceAfter: newBalanceUSD,
-        currency: 'USD',
+      // Tier 2: PostgreSQL ACID Transaction with Pessimistic Row Locking (SELECT ... FOR UPDATE)
+      let savedUser: User;
+      let savedWithdrawal: WithdrawalRequest;
+
+      await this.userRepo.manager.transaction(async (manager) => {
+        // Enforce maximum 2 concurrent PENDING withdrawal requests per user
+        const pendingCount = await manager.count(WithdrawalRequest, {
+          where: { userId, status: WithdrawalStatus.PENDING },
+        });
+        if (pendingCount >= 2) {
+          throw new BadRequestException(
+            'You already have 2 pending withdrawal requests under review. Please wait for them to be processed.',
+          );
+        }
+
+        const lockedUser = await manager.findOne(User, {
+          where: [{ id: userId }, { username }],
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!lockedUser) {
+          throw new NotFoundException('User account not found');
+        }
+
+        if (lockedUser.isMarketing) {
+          throw new ForbiddenException(
+            'Marketing promotional accounts are strictly restricted from real money withdrawals.',
+          );
+        }
+
+        const currentBalanceUSD = Number(lockedUser.balance);
+        if (currentBalanceUSD < amountUSD) {
+          const availableDisplay = (currentBalanceUSD * rate).toFixed(2);
+          throw new BadRequestException(
+            `Insufficient wallet balance. Available: ${targetCurrency} ${availableDisplay}`,
+          );
+        }
+
+        // Atomically deduct the requested amount from active wallet balance in pure USD
+        const newBalanceUSD = parseFloat((currentBalanceUSD - amountUSD).toFixed(2));
+        lockedUser.balance = newBalanceUSD;
+
+        if (saveDetails) {
+          const currentDetails = lockedUser.savedWithdrawalDetails || {};
+          currentDetails[method] = payoutDetails;
+          lockedUser.savedWithdrawalDetails = { ...currentDetails };
+        }
+
+        savedUser = await manager.save(lockedUser);
+
+        // Record transaction ledger (escrow hold in USD) inside same ACID transaction
+        await manager.save(Transaction, {
+          userId: savedUser.id,
+          type: 'WITHDRAWAL_ESCROW',
+          amount: -amountUSD,
+          multiplier: rate !== 1.0 ? rate : null,
+          balanceAfter: newBalanceUSD,
+          currency: 'USD',
+        });
+
+        // Create and save WithdrawalRequest record inside same ACID transaction
+        const detailsString = typeof payoutDetails === 'string' ? payoutDetails : JSON.stringify(payoutDetails);
+        const newWithdrawal = manager.create(WithdrawalRequest, {
+          userId: savedUser.id,
+          username: savedUser.username,
+          email: email || savedUser.email || undefined,
+          amount: cleanAmount,
+          currency: targetCurrency,
+          method: method || 'bank_transfer',
+          payoutDetails: detailsString,
+          status: WithdrawalStatus.PENDING,
+        });
+
+        savedWithdrawal = await manager.save(newWithdrawal);
       });
-    } catch (err) {
-      this.logger.error('Failed to save withdrawal escrow transaction', err);
+
+      const userRate = PLATFORM_EXCHANGE_RATES[(savedUser!.currency || 'USD').toUpperCase()] || 1.0;
+      const displayBalance = parseFloat((Number(savedUser!.balance) * userRate).toFixed(2));
+
+      // Update Redis Cache after successful database commit
+      try {
+        const sanitized = {
+          id: savedUser!.id,
+          username: savedUser!.username,
+          email: savedUser!.email,
+          phoneNumber: savedUser!.phoneNumber,
+          currency: savedUser!.currency,
+          balance: displayBalance,
+          baseBalance: Number(savedUser!.balance),
+          exchangeRate: userRate,
+          gamesPlayed: Number(savedUser!.gamesPlayed),
+          totalWon: Number(savedUser!.totalWon),
+          bestMultiplier: Number(savedUser!.bestMultiplier),
+          createdAt: savedUser!.createdAt ? new Date(savedUser!.createdAt).getTime() : Date.now(),
+          savedWithdrawalDetails: savedUser!.savedWithdrawalDetails,
+        };
+        await this.redisService.set(`user:${savedUser!.username.toLowerCase()}`, JSON.stringify(sanitized));
+        if (savedUser!.email) {
+          await this.redisService.set(`user:${savedUser!.email.toLowerCase()}`, JSON.stringify(sanitized));
+        }
+      } catch {}
+
+      this.logger.log(`New withdrawal request: ${savedUser!.username} - ${savedWithdrawal!.currency} ${cleanAmount} ($${amountUSD} USD) (${method})`);
+
+      // Notify player's active private room of updated balance
+      this.gameService.notifyUserBalance(
+        savedUser!.username,
+        displayBalance,
+        `Withdrawal request for ${savedWithdrawal!.currency} ${cleanAmount.toFixed(2)} submitted. Your wallet is held in escrow. ⏳`,
+        savedUser!.currency,
+      );
+
+      // Broadcast real-time notification strictly to Admin Room
+      this.gameService.notifyNewWithdrawal(savedWithdrawal!);
+
+      return savedWithdrawal!;
+    } finally {
+      await this.redisService.releaseLock(lockKey);
     }
-
-    // Create WithdrawalRequest record
-    const detailsString = typeof payoutDetails === 'string' ? payoutDetails : JSON.stringify(payoutDetails);
-    const newWithdrawal = this.withdrawalRepo.create({
-      userId: savedUser.id,
-      username: savedUser.username,
-      email: email || savedUser.email || undefined,
-      amount: cleanAmount,
-      currency: targetCurrency,
-      method: method || 'bank_transfer',
-      payoutDetails: detailsString,
-      status: WithdrawalStatus.PENDING,
-    });
-
-    const savedWithdrawal = await this.withdrawalRepo.save(newWithdrawal);
-    this.logger.log(`New withdrawal request: ${savedUser.username} - ${savedWithdrawal.currency} ${cleanAmount} ($${amountUSD} USD) (${method})`);
-
-    // Notify player's active game screen of updated balance
-    this.gameService.notifyUserBalance(
-      savedUser.username,
-      displayBalance,
-      `Withdrawal request for ${savedWithdrawal.currency} ${cleanAmount.toFixed(2)} submitted. Your wallet is held in escrow. ⏳`,
-      savedUser.currency,
-    );
-
-    // Broadcast real-time notification to Next.js Admin Dashboard
-    this.gameService.notifyNewWithdrawal(savedWithdrawal);
-
-    return savedWithdrawal;
   }
 
   async getWithdrawals(status?: string, limit: number = 50): Promise<WithdrawalRequest[]> {
@@ -766,185 +802,236 @@ export class AdminService implements OnModuleInit {
     reason?: string,
     adminUser: string = 'Admin',
   ): Promise<{ success: boolean; message: string; withdrawal: WithdrawalRequest }> {
-    const withdrawal = await this.withdrawalRepo.findOne({ where: { id: withdrawalId } });
-    if (!withdrawal) {
+    const target = await this.withdrawalRepo.findOne({ where: { id: withdrawalId } });
+    if (!target) {
       throw new NotFoundException('Withdrawal request not found');
     }
 
-    if (withdrawal.status !== WithdrawalStatus.PENDING) {
-      throw new BadRequestException(`Withdrawal is already ${withdrawal.status}`);
+    if (target.status !== WithdrawalStatus.PENDING) {
+      throw new BadRequestException(`Withdrawal is already ${target.status}`);
     }
 
-    const user = await this.userRepo.findOne({ where: [{ id: withdrawal.userId }, { username: withdrawal.username }] });
-    if (!user) {
-      throw new NotFoundException('User for this withdrawal was not found');
+    const lockKey = `lock:wallet:${target.userId}`;
+    const acquired = await this.redisService.acquireLock(lockKey, 5);
+    if (!acquired) {
+      throw new ConflictException(
+        'A wallet transaction is already in progress for this user. Please retry in a few seconds.',
+      );
     }
 
-    // REFUND amount back to active wallet balance (Universal Base USD)
-    const withdrawCurrency = (withdrawal.currency || 'USD').toUpperCase();
-    const rate = PLATFORM_EXCHANGE_RATES[withdrawCurrency] || 1.0;
-    const refundUSD = parseFloat((Number(withdrawal.amount) / rate).toFixed(2));
-    const prevBalanceUSD = Number(user.balance);
-    const newBalanceUSD = parseFloat((prevBalanceUSD + refundUSD).toFixed(2));
-    user.balance = newBalanceUSD;
-    const savedUser = await this.userRepo.save(user);
-
-    const userRate = PLATFORM_EXCHANGE_RATES[(savedUser.currency || 'USD').toUpperCase()] || 1.0;
-    const displayBalance = parseFloat((newBalanceUSD * userRate).toFixed(2));
-
-    // Update Redis
     try {
-      const sanitized = {
-        id: savedUser.id,
-        username: savedUser.username,
-        email: savedUser.email,
-        phoneNumber: savedUser.phoneNumber,
-        currency: savedUser.currency,
-        balance: displayBalance,
-        baseBalance: newBalanceUSD,
-        exchangeRate: userRate,
-        gamesPlayed: Number(savedUser.gamesPlayed),
-        totalWon: Number(savedUser.totalWon),
-        bestMultiplier: Number(savedUser.bestMultiplier),
-        createdAt: savedUser.createdAt ? new Date(savedUser.createdAt).getTime() : Date.now(),
-      };
-      await this.redisService.set(`user:${savedUser.username.toLowerCase()}`, JSON.stringify(sanitized));
-      if (savedUser.email) {
-        await this.redisService.set(`user:${savedUser.email.toLowerCase()}`, JSON.stringify(sanitized));
-      }
-    } catch {}
+      let savedUser: User;
+      let savedWithdrawal: WithdrawalRequest;
 
-    // Record ledger refund in USD
-    try {
-      await this.transactionRepo.save({
-        userId: savedUser.id,
-        type: 'WITHDRAWAL_REFUND',
-        amount: refundUSD,
-        multiplier: null,
-        balanceAfter: newBalanceUSD,
-        currency: 'USD',
+      await this.userRepo.manager.transaction(async (manager) => {
+        const lockedWithdrawal = await manager.findOne(WithdrawalRequest, {
+          where: { id: withdrawalId },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!lockedWithdrawal) throw new NotFoundException('Withdrawal request not found');
+        if (lockedWithdrawal.status !== WithdrawalStatus.PENDING) {
+          throw new BadRequestException(`Withdrawal is already ${lockedWithdrawal.status}`);
+        }
+
+        const lockedUser = await manager.findOne(User, {
+          where: [{ id: lockedWithdrawal.userId }, { username: lockedWithdrawal.username }],
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!lockedUser) throw new NotFoundException('User for this withdrawal was not found');
+
+        const withdrawCurrency = (lockedWithdrawal.currency || 'USD').toUpperCase();
+        const rate = PLATFORM_EXCHANGE_RATES[withdrawCurrency] || 1.0;
+        const refundUSD = parseFloat((Number(lockedWithdrawal.amount) / rate).toFixed(2));
+        const prevBalanceUSD = Number(lockedUser.balance);
+        const newBalanceUSD = parseFloat((prevBalanceUSD + refundUSD).toFixed(2));
+        lockedUser.balance = newBalanceUSD;
+        savedUser = await manager.save(lockedUser);
+
+        // Record ledger refund in USD inside same transaction
+        await manager.save(Transaction, {
+          userId: savedUser.id,
+          type: 'WITHDRAWAL_REFUND',
+          amount: refundUSD,
+          multiplier: null,
+          balanceAfter: newBalanceUSD,
+          currency: 'USD',
+        });
+
+        lockedWithdrawal.status = WithdrawalStatus.REJECTED;
+        lockedWithdrawal.adminNote = reason || 'Payment details could not be verified. Funds refunded.';
+        lockedWithdrawal.processedBy = adminUser;
+        lockedWithdrawal.processedAt = new Date();
+        savedWithdrawal = await manager.save(lockedWithdrawal);
       });
-    } catch {}
 
-    withdrawal.status = WithdrawalStatus.REJECTED;
-    withdrawal.adminNote = reason || 'Payment details could not be verified. Funds refunded.';
-    withdrawal.processedBy = adminUser;
-    withdrawal.processedAt = new Date();
-    const savedWithdrawal = await this.withdrawalRepo.save(withdrawal);
+      const userRate = PLATFORM_EXCHANGE_RATES[(savedUser!.currency || 'USD').toUpperCase()] || 1.0;
+      const displayBalance = parseFloat((Number(savedUser!.balance) * userRate).toFixed(2));
 
-    // Notify player that funds were refunded
-    this.gameService.notifyUserBalance(
-      savedUser.username,
-      displayBalance,
-      `Withdrawal of ${withdrawal.currency} ${Number(withdrawal.amount).toFixed(2)} rejected (${withdrawal.adminNote}). Funds refunded to your wallet! 🔄`,
-      savedUser.currency,
-    );
+      // Update Redis cache after commit
+      try {
+        const sanitized = {
+          id: savedUser!.id,
+          username: savedUser!.username,
+          email: savedUser!.email,
+          phoneNumber: savedUser!.phoneNumber,
+          currency: savedUser!.currency,
+          balance: displayBalance,
+          baseBalance: Number(savedUser!.balance),
+          exchangeRate: userRate,
+          gamesPlayed: Number(savedUser!.gamesPlayed),
+          totalWon: Number(savedUser!.totalWon),
+          bestMultiplier: Number(savedUser!.bestMultiplier),
+          createdAt: savedUser!.createdAt ? new Date(savedUser!.createdAt).getTime() : Date.now(),
+        };
+        await this.redisService.set(`user:${savedUser!.username.toLowerCase()}`, JSON.stringify(sanitized));
+        if (savedUser!.email) {
+          await this.redisService.set(`user:${savedUser!.email.toLowerCase()}`, JSON.stringify(sanitized));
+        }
+      } catch {}
 
-    this.logger.log(`Withdrawal REJECTED & REFUNDED: ${savedWithdrawal.id} for ${savedUser.username}`);
+      // Notify player private room that funds were refunded
+      this.gameService.notifyUserBalance(
+        savedUser!.username,
+        displayBalance,
+        `Withdrawal of ${savedWithdrawal!.currency} ${Number(savedWithdrawal!.amount).toFixed(2)} rejected (${savedWithdrawal!.adminNote}). Funds refunded to your wallet! 🔄`,
+        savedUser!.currency,
+      );
 
-    return {
-      success: true,
-      message: `Withdrawal rejected and ${withdrawal.currency} ${Number(withdrawal.amount).toFixed(2)} refunded to ${savedUser.username}`,
-      withdrawal: savedWithdrawal,
-    };
+      // Notify Admin room of updated status
+      this.gameService.notifyNewWithdrawal(savedWithdrawal!);
+
+      this.logger.log(`Withdrawal REJECTED & REFUNDED: ${savedWithdrawal!.id} for ${savedUser!.username}`);
+
+      return {
+        success: true,
+        message: `Withdrawal rejected and ${savedWithdrawal!.currency} ${Number(savedWithdrawal!.amount).toFixed(2)} refunded to ${savedUser!.username}`,
+        withdrawal: savedWithdrawal!,
+      };
+    } finally {
+      await this.redisService.releaseLock(lockKey);
+    }
   }
 
   async clientCancelWithdrawal(
     userId: string,
     withdrawalId: string,
   ): Promise<{ success: boolean; message: string; withdrawal: WithdrawalRequest; newBalance: number }> {
-    const withdrawal = await this.withdrawalRepo.findOne({ where: { id: withdrawalId } });
-    if (!withdrawal) {
+    const target = await this.withdrawalRepo.findOne({ where: { id: withdrawalId } });
+    if (!target) {
       throw new NotFoundException('Withdrawal request not found');
     }
 
-    if (withdrawal.userId !== userId) {
+    if (target.userId !== userId) {
       throw new BadRequestException('You do not have permission to cancel this withdrawal request.');
     }
 
-    if (withdrawal.status !== WithdrawalStatus.PENDING) {
-      throw new BadRequestException(`Withdrawal cannot be cancelled because it is already ${withdrawal.status}.`);
+    if (target.status !== WithdrawalStatus.PENDING) {
+      throw new BadRequestException(`Withdrawal cannot be cancelled because it is already ${target.status}.`);
     }
 
-    const user = await this.userRepo.findOne({ where: { id: userId } });
-    if (!user) {
-      throw new NotFoundException('User account not found');
+    const lockKey = `lock:wallet:${userId}`;
+    const acquired = await this.redisService.acquireLock(lockKey, 5);
+    if (!acquired) {
+      throw new ConflictException(
+        'A wallet transaction is already in progress. Please retry in a few seconds.',
+      );
     }
 
-    // Instantly refund escrowed amount back to playable balance in USD
-    const withdrawCurrency = (withdrawal.currency || 'USD').toUpperCase();
-    const rate = PLATFORM_EXCHANGE_RATES[withdrawCurrency] || 1.0;
-    const refundUSD = parseFloat((Number(withdrawal.amount) / rate).toFixed(2));
-    const prevBalanceUSD = Number(user.balance);
-    const newBalanceUSD = parseFloat((prevBalanceUSD + refundUSD).toFixed(2));
-    user.balance = newBalanceUSD;
-    const savedUser = await this.userRepo.save(user);
-
-    const userRate = PLATFORM_EXCHANGE_RATES[(savedUser.currency || 'USD').toUpperCase()] || 1.0;
-    const displayBalance = parseFloat((newBalanceUSD * userRate).toFixed(2));
-
-    // Update Redis Cache
     try {
-      const sanitized = {
-        id: savedUser.id,
-        username: savedUser.username,
-        email: savedUser.email,
-        phoneNumber: savedUser.phoneNumber,
-        currency: savedUser.currency,
-        balance: displayBalance,
-        baseBalance: newBalanceUSD,
-        exchangeRate: userRate,
-        gamesPlayed: Number(savedUser.gamesPlayed),
-        totalWon: Number(savedUser.totalWon),
-        bestMultiplier: Number(savedUser.bestMultiplier),
-        createdAt: savedUser.createdAt ? new Date(savedUser.createdAt).getTime() : Date.now(),
-      };
-      await this.redisService.set(`user:${savedUser.username.toLowerCase()}`, JSON.stringify(sanitized));
-      if (savedUser.email) {
-        await this.redisService.set(`user:${savedUser.email.toLowerCase()}`, JSON.stringify(sanitized));
-      }
-    } catch {}
+      let savedUser: User;
+      let savedWithdrawal: WithdrawalRequest;
 
-    // Record Transaction Ledger Entry in USD
-    try {
-      await this.transactionRepo.save({
-        userId: savedUser.id,
-        type: 'WITHDRAWAL_CANCEL_REFUND',
-        amount: refundUSD,
-        multiplier: null,
-        balanceAfter: newBalanceUSD,
-        currency: 'USD',
+      await this.userRepo.manager.transaction(async (manager) => {
+        const lockedWithdrawal = await manager.findOne(WithdrawalRequest, {
+          where: { id: withdrawalId },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!lockedWithdrawal) throw new NotFoundException('Withdrawal request not found');
+        if (lockedWithdrawal.userId !== userId) {
+          throw new BadRequestException('You do not have permission to cancel this withdrawal request.');
+        }
+        if (lockedWithdrawal.status !== WithdrawalStatus.PENDING) {
+          throw new BadRequestException(`Withdrawal cannot be cancelled because it is already ${lockedWithdrawal.status}.`);
+        }
+
+        const lockedUser = await manager.findOne(User, {
+          where: { id: userId },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!lockedUser) throw new NotFoundException('User account not found');
+
+        const withdrawCurrency = (lockedWithdrawal.currency || 'USD').toUpperCase();
+        const rate = PLATFORM_EXCHANGE_RATES[withdrawCurrency] || 1.0;
+        const refundUSD = parseFloat((Number(lockedWithdrawal.amount) / rate).toFixed(2));
+        const prevBalanceUSD = Number(lockedUser.balance);
+        const newBalanceUSD = parseFloat((prevBalanceUSD + refundUSD).toFixed(2));
+        lockedUser.balance = newBalanceUSD;
+        savedUser = await manager.save(lockedUser);
+
+        // Record Transaction Ledger Entry in USD inside same transaction
+        await manager.save(Transaction, {
+          userId: savedUser.id,
+          type: 'WITHDRAWAL_CANCEL_REFUND',
+          amount: refundUSD,
+          multiplier: null,
+          balanceAfter: newBalanceUSD,
+          currency: 'USD',
+        });
+
+        lockedWithdrawal.status = WithdrawalStatus.CANCELLED;
+        lockedWithdrawal.adminNote = 'Cancelled by player to return funds to wallet';
+        lockedWithdrawal.processedBy = `Player (${savedUser.username})`;
+        lockedWithdrawal.processedAt = new Date();
+        savedWithdrawal = await manager.save(lockedWithdrawal);
       });
-    } catch (err) {
-      this.logger.error('Failed to log WITHDRAWAL_CANCEL_REFUND ledger entry', err);
+
+      const userRate = PLATFORM_EXCHANGE_RATES[(savedUser!.currency || 'USD').toUpperCase()] || 1.0;
+      const displayBalance = parseFloat((Number(savedUser!.balance) * userRate).toFixed(2));
+
+      // Update Redis Cache
+      try {
+        const sanitized = {
+          id: savedUser!.id,
+          username: savedUser!.username,
+          email: savedUser!.email,
+          phoneNumber: savedUser!.phoneNumber,
+          currency: savedUser!.currency,
+          balance: displayBalance,
+          baseBalance: Number(savedUser!.balance),
+          exchangeRate: userRate,
+          gamesPlayed: Number(savedUser!.gamesPlayed),
+          totalWon: Number(savedUser!.totalWon),
+          bestMultiplier: Number(savedUser!.bestMultiplier),
+          createdAt: savedUser!.createdAt ? new Date(savedUser!.createdAt).getTime() : Date.now(),
+        };
+        await this.redisService.set(`user:${savedUser!.username.toLowerCase()}`, JSON.stringify(sanitized));
+        if (savedUser!.email) {
+          await this.redisService.set(`user:${savedUser!.email.toLowerCase()}`, JSON.stringify(sanitized));
+        }
+      } catch {}
+
+      // Notify player's active private room
+      this.gameService.notifyUserBalance(
+        savedUser!.username,
+        displayBalance,
+        `Withdrawal cancelled! ${savedWithdrawal!.currency} ${Number(savedWithdrawal!.amount).toFixed(2)} refunded to your balance. Ready to play! 🔄`,
+        savedUser!.currency,
+      );
+
+      // Notify Next.js Admin Dashboard so admin live table updates
+      this.gameService.notifyNewWithdrawal(savedWithdrawal!);
+
+      this.logger.log(`Withdrawal CANCELLED by player: ${savedWithdrawal!.id} for ${savedUser!.username} (+${savedWithdrawal!.currency} ${Number(savedWithdrawal!.amount).toFixed(2)})`);
+
+      return {
+        success: true,
+        message: `Withdrawal cancelled! ${savedWithdrawal!.currency} ${Number(savedWithdrawal!.amount).toFixed(2)} has been restored to your playable wallet balance.`,
+        withdrawal: savedWithdrawal!,
+        newBalance: displayBalance,
+      };
+    } finally {
+      await this.redisService.releaseLock(lockKey);
     }
-
-    // Update Withdrawal Request status to CANCELLED
-    withdrawal.status = WithdrawalStatus.CANCELLED;
-    withdrawal.adminNote = 'Cancelled by player to return funds to wallet';
-    withdrawal.processedBy = `Player (${savedUser.username})`;
-    withdrawal.processedAt = new Date();
-    const savedWithdrawal = await this.withdrawalRepo.save(withdrawal);
-
-    // Notify player's active game screen in real-time via Socket.IO
-    this.gameService.notifyUserBalance(
-      savedUser.username,
-      displayBalance,
-      `Withdrawal cancelled! ${withdrawal.currency} ${Number(withdrawal.amount).toFixed(2)} refunded to your balance. Ready to play! 🔄`,
-      savedUser.currency,
-    );
-
-    // Notify Next.js Admin Dashboard so admin live table updates
-    this.gameService.notifyNewWithdrawal(savedWithdrawal);
-
-    this.logger.log(`Withdrawal CANCELLED by player: ${savedWithdrawal.id} for ${savedUser.username} (+${withdrawal.currency} ${Number(withdrawal.amount).toFixed(2)})`);
-
-    return {
-      success: true,
-      message: `Withdrawal cancelled! ${withdrawal.currency} ${Number(withdrawal.amount).toFixed(2)} has been restored to your playable wallet balance.`,
-      withdrawal: savedWithdrawal,
-      newBalance: displayBalance,
-    };
   }
 
   async getClientHistory(userId: string, username: string) {
