@@ -111,6 +111,10 @@ fi
 sudo -u postgres psql -c "ALTER USER postgres PASSWORD '$ACTIVE_DB_PASS';"
 sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = 'skyrush_db'" | grep -q 1 || sudo -u postgres psql -c "CREATE DATABASE skyrush_db;"
 
+# Apply self-healing database constraints & indexes (idempotent)
+sudo -u postgres psql -d skyrush_db -c 'CREATE UNIQUE INDEX IF NOT EXISTS idx_deposit_ref_unique ON deposit_requests ("referenceNumber");' 2>/dev/null || true
+sudo -u postgres psql -d skyrush_db -c 'DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '\''chk_user_balance_non_negative'\'') THEN ALTER TABLE users ADD CONSTRAINT chk_user_balance_non_negative CHECK (balance >= 0); END IF; END $$;' 2>/dev/null || true
+
 # 6. Build & Launch Backend Server
 echo "🚀 [6/8] Building and Launching NestJS Backend..."
 cd /var/www/skyrush/server
