@@ -278,7 +278,7 @@ export class AuthService implements OnModuleInit {
       baseBalance: baseBal, // Universal USD base in database
       exchangeRate: rate,
       gamesPlayed: Number(user.gamesPlayed),
-      totalWon: Number(user.totalWon),
+      totalWon: parseFloat((Number(user.totalWon || 0) * rate).toFixed(2)),
       bestMultiplier: Number(user.bestMultiplier),
       createdAt: user.createdAt ? new Date(user.createdAt).getTime() : Date.now(),
       savedWithdrawalDetails: user.savedWithdrawalDetails,

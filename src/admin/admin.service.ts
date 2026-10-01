@@ -392,7 +392,7 @@ export class AdminService implements OnModuleInit {
         baseBalance: newBalanceUSD,
         exchangeRate: userRate,
         gamesPlayed: Number(savedUser.gamesPlayed),
-        totalWon: Number(savedUser.totalWon),
+        totalWon: parseFloat((Number(savedUser.totalWon || 0) * userRate).toFixed(2)),
         bestMultiplier: Number(savedUser.bestMultiplier),
         createdAt: savedUser.createdAt ? new Date(savedUser.createdAt).getTime() : Date.now(),
       };
@@ -511,7 +511,7 @@ export class AdminService implements OnModuleInit {
         baseBalance: newBalanceUSD,
         exchangeRate: userRate,
         gamesPlayed: Number(savedUser.gamesPlayed),
-        totalWon: Number(savedUser.totalWon),
+        totalWon: parseFloat((Number(savedUser.totalWon || 0) * userRate).toFixed(2)),
         bestMultiplier: Number(savedUser.bestMultiplier),
         createdAt: savedUser.createdAt ? new Date(savedUser.createdAt).getTime() : Date.now(),
       };
@@ -741,7 +741,7 @@ export class AdminService implements OnModuleInit {
           baseBalance: Number(savedUser!.balance),
           exchangeRate: userRate,
           gamesPlayed: Number(savedUser!.gamesPlayed),
-          totalWon: Number(savedUser!.totalWon),
+          totalWon: parseFloat((Number(savedUser!.totalWon || 0) * userRate).toFixed(2)),
           bestMultiplier: Number(savedUser!.bestMultiplier),
           createdAt: savedUser!.createdAt ? new Date(savedUser!.createdAt).getTime() : Date.now(),
           savedWithdrawalDetails: savedUser!.savedWithdrawalDetails,
@@ -924,7 +924,7 @@ export class AdminService implements OnModuleInit {
           baseBalance: Number(savedUser!.balance),
           exchangeRate: userRate,
           gamesPlayed: Number(savedUser!.gamesPlayed),
-          totalWon: Number(savedUser!.totalWon),
+          totalWon: parseFloat((Number(savedUser!.totalWon || 0) * userRate).toFixed(2)),
           bestMultiplier: Number(savedUser!.bestMultiplier),
           createdAt: savedUser!.createdAt ? new Date(savedUser!.createdAt).getTime() : Date.now(),
         };
@@ -1045,7 +1045,7 @@ export class AdminService implements OnModuleInit {
           baseBalance: Number(savedUser!.balance),
           exchangeRate: userRate,
           gamesPlayed: Number(savedUser!.gamesPlayed),
-          totalWon: Number(savedUser!.totalWon),
+          totalWon: parseFloat((Number(savedUser!.totalWon || 0) * userRate).toFixed(2)),
           bestMultiplier: Number(savedUser!.bestMultiplier),
           createdAt: savedUser!.createdAt ? new Date(savedUser!.createdAt).getTime() : Date.now(),
         };
@@ -1396,16 +1396,23 @@ export class AdminService implements OnModuleInit {
     user.isMarketingAutoWin = isMarketing ? isMarketingAutoWin : false;
     const saved = await this.userRepo.save(user);
 
+    const userCur = (saved.currency || 'USD').toUpperCase();
+    const userRate = PLATFORM_EXCHANGE_RATES[userCur] || 1.0;
+    const displayBal = parseFloat((Number(saved.balance || 0) * userRate).toFixed(2));
+    const displayWon = parseFloat((Number(saved.totalWon || 0) * userRate).toFixed(2));
+
     try {
       const sanitized = {
         id: saved.id,
         username: saved.username,
         email: saved.email,
         phoneNumber: saved.phoneNumber,
-        currency: saved.currency,
-        balance: Number(saved.balance),
+        currency: userCur,
+        balance: displayBal,
+        baseBalance: Number(saved.balance || 0),
+        exchangeRate: userRate,
         gamesPlayed: Number(saved.gamesPlayed),
-        totalWon: Number(saved.totalWon),
+        totalWon: displayWon,
         bestMultiplier: Number(saved.bestMultiplier),
         createdAt: saved.createdAt ? new Date(saved.createdAt).getTime() : Date.now(),
         savedWithdrawalDetails: saved.savedWithdrawalDetails,
@@ -1503,7 +1510,7 @@ export class AdminService implements OnModuleInit {
         baseBalance: Number(userObj.balance),
         exchangeRate: rate,
         gamesPlayed: Number(userObj.gamesPlayed),
-        totalWon: Number(userObj.totalWon),
+        totalWon: parseFloat((Number(userObj.totalWon || 0) * rate).toFixed(2)),
         bestMultiplier: Number(userObj.bestMultiplier),
         createdAt: userObj.createdAt ? new Date(userObj.createdAt).getTime() : Date.now(),
         savedWithdrawalDetails: userObj.savedWithdrawalDetails,
