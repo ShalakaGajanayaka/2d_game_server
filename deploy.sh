@@ -30,36 +30,48 @@ mkdir -p /var/www/skyrush
 cd /var/www/skyrush
 git config --global credential.helper store
 
+# Self-healing: Purge any accidental nested clones inside server
+rm -rf /var/www/skyrush/server/dashboard /var/www/skyrush/server/game_app 2>/dev/null || true
+
 # Backend Server
-if [ -d "server/.git" ]; then
+if [ -d "/var/www/skyrush/server/.git" ]; then
     echo "🔄 Updating Server from GitHub..."
-    cd server && git pull origin main && cd ..
+    cd /var/www/skyrush/server
+    git fetch origin main
+    git reset --hard origin/main
 else
     echo "📥 Cloning Server from GitHub..."
+    cd /var/www/skyrush
     git clone https://github.com/ShalakaGajanayaka/2d_game_server.git server
 fi
 
 # Dashboard
-if [ -d "dashboard" ] && [ ! -d "dashboard/.git" ]; then
-    rm -rf dashboard
+if [ -d "/var/www/skyrush/dashboard" ] && [ ! -d "/var/www/skyrush/dashboard/.git" ]; then
+    rm -rf /var/www/skyrush/dashboard
 fi
-if [ -d "dashboard/.git" ]; then
+if [ -d "/var/www/skyrush/dashboard/.git" ]; then
     echo "🔄 Updating Dashboard from GitHub..."
-    cd dashboard && git pull origin main && cd ..
+    cd /var/www/skyrush/dashboard
+    git fetch origin main
+    git reset --hard origin/main
 else
     echo "📥 Cloning Dashboard from GitHub..."
+    cd /var/www/skyrush
     git clone https://github.com/ShalakaGajanayaka/casino_dashboard.git dashboard
 fi
 
 # Game App
-if [ -d "game_app" ] && [ ! -d "game_app/.git" ]; then
-    rm -rf game_app
+if [ -d "/var/www/skyrush/game_app" ] && [ ! -d "/var/www/skyrush/game_app/.git" ]; then
+    rm -rf /var/www/skyrush/game_app
 fi
-if [ -d "game_app/.git" ]; then
+if [ -d "/var/www/skyrush/game_app/.git" ]; then
     echo "🔄 Updating Game App from GitHub..."
-    cd game_app && git pull origin main && cd ..
+    cd /var/www/skyrush/game_app
+    git fetch origin main
+    git reset --hard origin/main
 else
     echo "📥 Cloning Game App from GitHub..."
+    cd /var/www/skyrush
     git clone https://github.com/ShalakaGajanayaka/2d_game_app.git game_app
 fi
 
