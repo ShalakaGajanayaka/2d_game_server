@@ -46,6 +46,15 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
       const cleanToken = data.token.trim();
       const username = await this.redisService.get(`token:${cleanToken}`);
       if (username) {
+        // SECURITY PATCH: Purge any previously joined private user rooms on this socket
+        // to strictly prevent multi-user cross-subscription eavesdropping attacks
+        for (const room of client.rooms) {
+          if (room.startsWith('user:')) {
+            client.leave(room);
+            this.logger.log(`Security: Socket [${client.id}] purged prior private room [${room}] on re-auth`);
+          }
+        }
+
         // Join username room
         const userRoom = `user:${username.toLowerCase()}`;
         client.join(userRoom);

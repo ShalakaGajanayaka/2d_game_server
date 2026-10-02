@@ -72,12 +72,15 @@ export class AdminController {
       throw new UnauthorizedException('User account not found');
     }
 
+    // SECURITY PATCH: Lock currency strictly to immutable user account currency to prevent arbitrage / spoofing
+    const lockedCurrency = (user.currency || 'USD').toUpperCase();
+
     const deposit = await this.adminService.clientSubmitDeposit(
       user.id,
       user.username,
       user.email,
       body.amount,
-      body.currency || user.currency || 'USD',
+      lockedCurrency,
       body.paymentMethod,
       body.referenceNumber,
     );
@@ -119,12 +122,15 @@ export class AdminController {
       throw new UnauthorizedException('User account not found');
     }
 
+    // SECURITY PATCH: Lock currency strictly to immutable user account currency to prevent arbitrage / spoofing
+    const lockedCurrency = (user.currency || 'USD').toUpperCase();
+
     const withdrawal = await this.adminService.clientSubmitWithdrawal(
       user.id,
       user.username,
       user.email,
       body.amount,
-      body.currency || user.currency || 'USD',
+      lockedCurrency,
       body.method,
       body.payoutDetails,
       body.saveDetails,

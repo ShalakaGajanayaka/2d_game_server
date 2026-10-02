@@ -3,8 +3,18 @@ import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 
+import helmet from 'helmet';
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+
+  // Apply Helmet Security Headers (Defense-in-Depth against XSS, clickjacking, fingerprinting)
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+      crossOriginEmbedderPolicy: false,
+    }),
+  );
 
   // Trust reverse proxy (Cloudflare, Nginx, Render) for client IP detection
   const expressApp = app.getHttpAdapter().getInstance();
@@ -12,14 +22,13 @@ async function bootstrap() {
     expressApp.set('trust proxy', 1);
   }
 
-
-
-  // Global DTO Validation Pipe
+  // Global DTO Validation Pipe with strict Mass-Assignment protection
   app.useGlobalPipes(
     new ValidationPipe({
       transform: true,
-      whitelist: false,
+      whitelist: true, // Strips unwhitelisted properties from requests
       forbidUnknownValues: false,
+      stopAtFirstError: true,
     }),
   );
 
