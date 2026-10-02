@@ -345,109 +345,139 @@ export class AdminService implements OnModuleInit {
   }
 
   async approveDeposit(depositId: string, adminUser: string = 'Admin'): Promise<{ success: boolean; message: string; user: User; deposit: DepositRequest }> {
-    const deposit = await this.depositRepo.findOne({ where: { id: depositId } });
-    if (!deposit) {
+    const initialDeposit = await this.depositRepo.findOne({ where: { id: depositId } });
+    if (!initialDeposit) {
       throw new NotFoundException('Deposit request not found');
     }
 
-    if (deposit.status !== DepositStatus.PENDING) {
-      throw new BadRequestException(`Deposit is already ${deposit.status}`);
+    if (initialDeposit.status !== DepositStatus.PENDING) {
+      throw new BadRequestException(`Deposit is already ${initialDeposit.status}`);
     }
 
-    const user = await this.userRepo.findOne({ where: [{ id: deposit.userId }, { username: deposit.username }] });
-    if (!user) {
-      throw new NotFoundException('User for this deposit was not found');
+    const lockKey = `lock:wallet:${initialDeposit.userId}`;
+    const acquired = await this.redisService.acquireLock(lockKey, 5);
+    if (!acquired) {
+      throw new ConflictException('A wallet transaction is already in progress for this user. Please retry in a few seconds.');
     }
 
-    const depositAmount = Number(deposit.amount);
-    const prevBalanceUSD = Number(user.balance);
-
-    // Multi-Currency Normalization: Convert deposit currency to Universal Base USD
-    const depositCurrency = (deposit.currency || 'USDT').toUpperCase();
-    const userCurrency = (user.currency || 'USD').toUpperCase();
-    const depositRate = PLATFORM_EXCHANGE_RATES[depositCurrency] || 1.0;
-    const userRate = PLATFORM_EXCHANGE_RATES[userCurrency] || 1.0;
-
-    // Direct USD value to credit into user.balance in database (6 decimal precision)
-    const depositUSD = parseFloat((depositAmount / depositRate).toFixed(6));
-    const newBalanceUSD = parseFloat((prevBalanceUSD + depositUSD).toFixed(6));
-
-    // Player display values with exact cent rounding
-    const creditedDisplayAmount = Math.round((depositUSD * userRate) * 100) / 100;
-    const displayBalance = Math.round((newBalanceUSD * userRate) * 100) / 100;
-
-    // Atomically update user balance in PostgreSQL (in pure USD)
-    user.balance = newBalanceUSD;
-    const savedUser = await this.userRepo.save(user);
-
-    // Update Redis Cache
     try {
-      const sanitized = {
-        id: savedUser.id,
-        username: savedUser.username,
-        email: savedUser.email,
-        phoneNumber: savedUser.phoneNumber,
-        currency: userCurrency,
-        balance: displayBalance,
-        baseBalance: newBalanceUSD,
-        exchangeRate: userRate,
-        gamesPlayed: Number(savedUser.gamesPlayed),
-        totalWon: parseFloat((Number(savedUser.totalWon || 0) * userRate).toFixed(2)),
-        bestMultiplier: Number(savedUser.bestMultiplier),
-        createdAt: savedUser.createdAt ? new Date(savedUser.createdAt).getTime() : Date.now(),
-      };
-      await this.redisService.set(`user:${savedUser.username.toLowerCase()}`, JSON.stringify(sanitized));
-      if (savedUser.email) {
-        await this.redisService.set(`user:${savedUser.email.toLowerCase()}`, JSON.stringify(sanitized));
-      }
-    } catch (err) {
-      this.logger.warn('Failed to update user Redis cache on deposit approval', err);
-    }
+      let savedUser: User;
+      let savedDeposit: DepositRequest;
+      let depositUSD: number = 0;
+      let newBalanceUSD: number = 0;
+      let creditedDisplayAmount: number = 0;
+      let displayBalance: number = 0;
+      let userCurrency: string = 'USD';
+      let depositAmount: number = 0;
+      let depositCurrency: string = 'USD';
 
-    // Save transaction ledger entry in Universal Base USD
-    try {
-      await this.transactionRepo.save({
-        userId: savedUser.id,
-        type: 'DEPOSIT',
-        amount: depositUSD,
-        multiplier: depositRate !== 1.0 ? depositRate : null,
-        balanceAfter: newBalanceUSD,
-        currency: 'USD',
+      await this.userRepo.manager.transaction(async (manager) => {
+        const lockedDeposit = await manager.findOne(DepositRequest, {
+          where: { id: depositId },
+          lock: { mode: 'pessimistic_write' },
+        });
+
+        if (!lockedDeposit) {
+          throw new NotFoundException('Deposit request not found');
+        }
+
+        if (lockedDeposit.status !== DepositStatus.PENDING) {
+          throw new BadRequestException(`Deposit is already ${lockedDeposit.status}`);
+        }
+
+        const lockedUser = await manager.findOne(User, {
+          where: [{ id: lockedDeposit.userId }, { username: lockedDeposit.username }],
+          lock: { mode: 'pessimistic_write' },
+        });
+
+        if (!lockedUser) {
+          throw new NotFoundException('User for this deposit was not found');
+        }
+
+        depositAmount = Number(lockedDeposit.amount);
+        const prevBalanceUSD = Number(lockedUser.balance);
+
+        depositCurrency = (lockedDeposit.currency || 'USDT').toUpperCase();
+        userCurrency = (lockedUser.currency || 'USD').toUpperCase();
+        const depositRate = PLATFORM_EXCHANGE_RATES[depositCurrency] || 1.0;
+        const userRate = PLATFORM_EXCHANGE_RATES[userCurrency] || 1.0;
+
+        depositUSD = parseFloat((depositAmount / depositRate).toFixed(6));
+        newBalanceUSD = parseFloat((prevBalanceUSD + depositUSD).toFixed(6));
+
+        creditedDisplayAmount = Math.round((depositUSD * userRate) * 100) / 100;
+        displayBalance = Math.round((newBalanceUSD * userRate) * 100) / 100;
+
+        lockedUser.balance = newBalanceUSD;
+        savedUser = await manager.save(lockedUser);
+
+        await manager.save(Transaction, {
+          userId: savedUser.id,
+          type: 'DEPOSIT',
+          amount: depositUSD,
+          multiplier: depositRate !== 1.0 ? depositRate : null,
+          balanceAfter: newBalanceUSD,
+          currency: 'USD',
+        });
+
+        lockedDeposit.status = DepositStatus.APPROVED;
+        lockedDeposit.approvedBy = adminUser;
+        lockedDeposit.approvedAt = new Date();
+        savedDeposit = await manager.save(lockedDeposit);
       });
-    } catch (err) {
-      this.logger.error('Failed to save deposit transaction ledger', err);
+
+      // Update Redis Cache
+      try {
+        const userRate = PLATFORM_EXCHANGE_RATES[userCurrency] || 1.0;
+        const sanitized = {
+          id: savedUser!.id,
+          username: savedUser!.username,
+          email: savedUser!.email,
+          phoneNumber: savedUser!.phoneNumber,
+          currency: userCurrency,
+          balance: displayBalance,
+          baseBalance: newBalanceUSD,
+          exchangeRate: userRate,
+          gamesPlayed: Number(savedUser!.gamesPlayed),
+          totalWon: parseFloat((Number(savedUser!.totalWon || 0) * userRate).toFixed(2)),
+          bestMultiplier: Number(savedUser!.bestMultiplier),
+          createdAt: savedUser!.createdAt ? new Date(savedUser!.createdAt).getTime() : Date.now(),
+        };
+        await this.redisService.set(`user:${savedUser!.username.toLowerCase()}`, JSON.stringify(sanitized));
+        if (savedUser!.email) {
+          await this.redisService.set(`user:${savedUser!.email.toLowerCase()}`, JSON.stringify(sanitized));
+        }
+      } catch (err) {
+        this.logger.warn('Failed to update user Redis cache on deposit approval', err);
+      }
+
+      // Notify player via WebSocket
+      const creditMsg = userCurrency === 'USD' || userCurrency === 'USDT'
+        ? `Deposit of ${depositAmount.toFixed(2)} ${depositCurrency} approved! Credited $${depositUSD.toFixed(2)} USD to your balance. 💰`
+        : `Deposit of ${depositAmount.toFixed(2)} ${depositCurrency} approved! Credited ${userCurrency} ${creditedDisplayAmount.toFixed(2)} ($${depositUSD.toFixed(2)} USD) to your balance. 💰`;
+
+      this.gameService.notifyUserBalance(
+        {
+          id: savedUser!.id,
+          username: savedUser!.username,
+          email: savedUser!.email,
+        },
+        displayBalance,
+        creditMsg,
+        userCurrency,
+      );
+
+      this.logger.log(`Deposit APPROVED: ${savedDeposit!.id} for ${savedUser!.username} (+${savedDeposit!.currency} ${depositAmount} -> +$${depositUSD} USD). New Balance: $${newBalanceUSD} USD`);
+
+      return {
+        success: true,
+        message: `Deposit of ${savedDeposit!.currency} ${depositAmount.toFixed(2)} approved successfully! Credited $${depositUSD.toFixed(2)} USD to ${savedUser!.username}.`,
+        user: savedUser!,
+        deposit: savedDeposit!,
+      };
+    } finally {
+      await this.redisService.releaseLock(lockKey);
     }
-
-    // Mark deposit as APPROVED
-    deposit.status = DepositStatus.APPROVED;
-    deposit.approvedBy = adminUser;
-    deposit.approvedAt = new Date();
-    const savedDeposit = await this.depositRepo.save(deposit);
-
-    // Notify player's active game screen in real-time via WebSocket
-    const creditMsg = userCurrency === 'USD' || userCurrency === 'USDT'
-      ? `Deposit of ${depositAmount.toFixed(2)} ${depositCurrency} approved! Credited $${depositUSD.toFixed(2)} USD to your balance. 💰`
-      : `Deposit of ${depositAmount.toFixed(2)} ${depositCurrency} approved! Credited ${userCurrency} ${creditedDisplayAmount.toFixed(2)} ($${depositUSD.toFixed(2)} USD) to your balance. 💰`;
-
-    this.gameService.notifyUserBalance(
-      {
-        id: savedUser.id,
-        username: savedUser.username,
-        email: savedUser.email,
-      },
-      displayBalance,
-      creditMsg,
-      userCurrency,
-    );
-
-    this.logger.log(`Deposit APPROVED: ${savedDeposit.id} for ${savedUser.username} (+${savedDeposit.currency} ${depositAmount} -> +$${depositUSD} USD). New Balance: $${newBalanceUSD} USD`);
-
-    return {
-      success: true,
-      message: `Deposit of ${savedDeposit.currency} ${depositAmount.toFixed(2)} approved successfully! Credited $${depositUSD.toFixed(2)} USD to ${savedUser.username}.`,
-      user: savedUser,
-      deposit: savedDeposit,
-    };
   }
 
   async rejectDeposit(depositId: string, reason?: string, adminUser: string = 'Admin'): Promise<DepositRequest> {
@@ -481,91 +511,116 @@ export class AdminService implements OnModuleInit {
       throw new BadRequestException('Credit amount must be greater than zero');
     }
 
-    const user = await this.userRepo.findOne({
+    const initialUser = await this.userRepo.findOne({
       where: [{ username: ILike(clean) }, { email: ILike(clean) }],
     });
 
-    if (!user) {
+    if (!initialUser) {
       throw new NotFoundException(`User '${clean}' not found in database`);
     }
 
-    const prevBalanceUSD = Number(user.balance);
-    const newBalanceUSD = parseFloat((prevBalanceUSD + cleanAmountUSD).toFixed(6));
-    user.balance = newBalanceUSD;
-    const savedUser = await this.userRepo.save(user);
+    const lockKey = `lock:wallet:${initialUser.id}`;
+    const acquired = await this.redisService.acquireLock(lockKey, 5);
+    if (!acquired) {
+      throw new ConflictException('A wallet transaction is already in progress for this user. Please retry in a few seconds.');
+    }
 
-    const userCurrency = (savedUser.currency || 'USD').toUpperCase();
-    const userRate = PLATFORM_EXCHANGE_RATES[userCurrency] || 1.0;
-    const displayBalance = Math.round((newBalanceUSD * userRate) * 100) / 100;
-    const creditedDisplayAmount = Math.round((cleanAmountUSD * userRate) * 100) / 100;
-
-    // Update Redis
     try {
-      const sanitized = {
-        id: savedUser.id,
-        username: savedUser.username,
-        email: savedUser.email,
-        phoneNumber: savedUser.phoneNumber,
-        currency: userCurrency,
-        balance: displayBalance,
-        baseBalance: newBalanceUSD,
-        exchangeRate: userRate,
-        gamesPlayed: Number(savedUser.gamesPlayed),
-        totalWon: parseFloat((Number(savedUser.totalWon || 0) * userRate).toFixed(2)),
-        bestMultiplier: Number(savedUser.bestMultiplier),
-        createdAt: savedUser.createdAt ? new Date(savedUser.createdAt).getTime() : Date.now(),
+      let savedUser: User;
+      let newBalanceUSD: number = 0;
+      let displayBalance: number = 0;
+      let creditedDisplayAmount: number = 0;
+      let userCurrency: string = 'USD';
+
+      await this.userRepo.manager.transaction(async (manager) => {
+        const lockedUser = await manager.findOne(User, {
+          where: { id: initialUser.id },
+          lock: { mode: 'pessimistic_write' },
+        });
+
+        if (!lockedUser) {
+          throw new NotFoundException(`User '${clean}' not found in database`);
+        }
+
+        const prevBalanceUSD = Number(lockedUser.balance);
+        newBalanceUSD = parseFloat((prevBalanceUSD + cleanAmountUSD).toFixed(6));
+        lockedUser.balance = newBalanceUSD;
+        savedUser = await manager.save(lockedUser);
+
+        userCurrency = (savedUser.currency || 'USD').toUpperCase();
+        const userRate = PLATFORM_EXCHANGE_RATES[userCurrency] || 1.0;
+        displayBalance = Math.round((newBalanceUSD * userRate) * 100) / 100;
+        creditedDisplayAmount = Math.round((cleanAmountUSD * userRate) * 100) / 100;
+
+        await manager.save(Transaction, {
+          userId: savedUser.id,
+          type: 'MANUAL_DEPOSIT',
+          amount: cleanAmountUSD,
+          multiplier: null,
+          balanceAfter: newBalanceUSD,
+          currency: 'USD',
+        });
+
+        await manager.save(DepositRequest, {
+          userId: savedUser.id,
+          username: savedUser.username,
+          email: savedUser.email || undefined,
+          amount: cleanAmountUSD,
+          currency: 'USD',
+          paymentMethod: 'admin_manual',
+          referenceNumber: `ADMIN-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          status: DepositStatus.APPROVED,
+          adminNote: note || 'Direct admin manual credit ($ USD)',
+          approvedBy: adminUser,
+          approvedAt: new Date(),
+        });
+      });
+
+      // Update Redis
+      try {
+        const userRate = PLATFORM_EXCHANGE_RATES[userCurrency] || 1.0;
+        const sanitized = {
+          id: savedUser!.id,
+          username: savedUser!.username,
+          email: savedUser!.email,
+          phoneNumber: savedUser!.phoneNumber,
+          currency: userCurrency,
+          balance: displayBalance,
+          baseBalance: newBalanceUSD,
+          exchangeRate: userRate,
+          gamesPlayed: Number(savedUser!.gamesPlayed),
+          totalWon: parseFloat((Number(savedUser!.totalWon || 0) * userRate).toFixed(2)),
+          bestMultiplier: Number(savedUser!.bestMultiplier),
+          createdAt: savedUser!.createdAt ? new Date(savedUser!.createdAt).getTime() : Date.now(),
+        };
+        await this.redisService.set(`user:${savedUser!.username.toLowerCase()}`, JSON.stringify(sanitized));
+        if (savedUser!.email) {
+          await this.redisService.set(`user:${savedUser!.email.toLowerCase()}`, JSON.stringify(sanitized));
+        }
+      } catch {}
+
+      // Notify player via WebSocket
+      this.gameService.notifyUserBalance(
+        {
+          id: savedUser!.id,
+          username: savedUser!.username,
+          email: savedUser!.email,
+        },
+        displayBalance,
+        `🎉 Admin credited $${cleanAmountUSD.toFixed(2)} USD (+${userCurrency} ${creditedDisplayAmount.toFixed(2)}) to your wallet! 💰`,
+        userCurrency,
+      );
+
+      this.logger.log(`Manual credit by ${adminUser}: ${savedUser!.username} +$${cleanAmountUSD} USD (Note: ${note || 'None'}). New Balance: $${newBalanceUSD} USD`);
+
+      return {
+        success: true,
+        message: `Successfully credited $${cleanAmountUSD.toFixed(2)} USD to ${savedUser!.username}`,
+        user: savedUser!,
       };
-      await this.redisService.set(`user:${savedUser.username.toLowerCase()}`, JSON.stringify(sanitized));
-      if (savedUser.email) {
-        await this.redisService.set(`user:${savedUser.email.toLowerCase()}`, JSON.stringify(sanitized));
-      }
-    } catch {}
-
-    // Record ledger transaction in USD
-    try {
-      await this.transactionRepo.save({
-        userId: savedUser.id,
-        type: 'MANUAL_DEPOSIT',
-        amount: cleanAmountUSD,
-        multiplier: null,
-        balanceAfter: newBalanceUSD,
-        currency: 'USD',
-      });
-    } catch {}
-
-    // Create an approved deposit audit record in USD
-    try {
-      await this.depositRepo.save({
-        userId: savedUser.id,
-        username: savedUser.username,
-        email: savedUser.email || undefined,
-        amount: cleanAmountUSD,
-        currency: 'USD',
-        paymentMethod: 'admin_manual',
-        referenceNumber: `ADMIN-${Date.now()}`,
-        status: DepositStatus.APPROVED,
-        adminNote: note || 'Direct admin manual credit ($ USD)',
-        approvedBy: adminUser,
-        approvedAt: new Date(),
-      });
-    } catch {}
-
-    this.gameService.notifyUserBalance(
-      {
-        id: savedUser.id,
-        username: savedUser.username,
-        email: savedUser.email,
-      },
-      displayBalance,
-      `🎉 Admin credited $${cleanAmountUSD.toFixed(2)} USD (+${userCurrency} ${creditedDisplayAmount.toFixed(2)}) to your wallet! 💰`,
-      userCurrency,
-    );
-
-    return {
-      success: true,
-      message: `Successfully credited $${cleanAmountUSD.toFixed(2)} USD to ${savedUser.username}`,
-      user: savedUser,
-    };
+    } finally {
+      await this.redisService.releaseLock(lockKey);
+    }
   }
 
   async getUsers(search?: string, limit: number = 50): Promise<User[]> {

@@ -296,10 +296,29 @@ export class AuthService implements OnModuleInit {
     };
   }
 
-  async register(identifier: string, password: string, currency?: string): Promise<{ token: string; user: UserProfile }> {
+  async register(
+    identifier: string,
+    password: string,
+    currency?: string,
+    clientIp?: string,
+  ): Promise<{ token: string; user: UserProfile }> {
     const clean = identifier?.trim().replace(/\s+/g, '');
     if (!clean || clean.length < 3) {
       throw new BadRequestException('Please enter a valid email or mobile number');
+    }
+
+    // IP Registration Quota Protection (Max 5 account registrations per IP per hour)
+    if (clientIp) {
+      const ipKey = `reg_rate_ip:${clientIp}`;
+      const regCountRaw = await this.redisService.get(ipKey);
+      const regCount = regCountRaw ? parseInt(regCountRaw, 10) : 0;
+      if (regCount >= 5) {
+        throw new HttpException(
+          'Registration limit exceeded for this network. Please try again in an hour.',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+      await this.redisService.set(ipKey, (regCount + 1).toString(), 3600);
     }
 
     const isEmail = clean.includes('@');
@@ -404,6 +423,12 @@ export class AuthService implements OnModuleInit {
       where: whereConditions,
     });
     if (!user) {
+      // Timing attack mitigation: Perform dummy bcrypt comparison so response time matches valid accounts
+      const dummyHash = '$2b$10$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234';
+      try {
+        await bcrypt.compare(password, dummyHash);
+      } catch {}
+
       const newAttempts = attempts + 1;
       await this.redisService.set(attemptsKey, newAttempts.toString(), 300);
       const remaining = 5 - newAttempts;
@@ -1316,7 +1341,11 @@ export class AuthService implements OnModuleInit {
 
     const user = await this.userRepository.findOne({ where: whereConditions });
     if (!user) {
-      throw new BadRequestException('No account found with this email/number. Please register.');
+      // Security: Uniform response to prevent account enumeration
+      return {
+        success: true,
+        message: 'If an account matches this email or mobile number, a verification code has been dispatched.',
+      };
     }
 
     // Generate 6-digit cryptographically secure OTP (CSPRNG)
@@ -1353,9 +1382,7 @@ export class AuthService implements OnModuleInit {
 
     return {
       success: true,
-      message: targetEmail
-        ? (emailSent ? `Verification code sent to ${targetEmail}!` : `Verification code generated for ${targetEmail}.`)
-        : `Verification code sent to ${target}`,
+      message: 'If an account matches this email or mobile number, a verification code has been dispatched.',
       ...(!isProduction && !emailSent ? { devOtp: otp } : {}),
     };
   }

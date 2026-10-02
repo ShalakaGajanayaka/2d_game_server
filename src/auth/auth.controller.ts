@@ -23,15 +23,15 @@ export class AuthController {
   }
 
   @Get('check-phone')
-  async checkPhone(@Query('phone') phone: string) {
-    const exists = await this.authService.checkPhoneExists(phone);
-    return { exists };
+  async checkPhone() {
+    throw new BadRequestException('Endpoint permanently disabled for user privacy.');
   }
 
   @Post('register')
-  async register(@Body() body: RegisterDto) {
+  async register(@Req() req: any, @Body() body: RegisterDto) {
+    const clientIp = (req?.headers?.['cf-connecting-ip'] || req?.headers?.['x-forwarded-for'] || req?.ip || '').toString().split(',')[0].trim();
     const identifier = body.email || body.phoneNumber || body.mobile || body.username || '';
-    return this.authService.register(identifier, body.password, body.currency);
+    return this.authService.register(identifier, body.password, body.currency, clientIp);
   }
 
   @Post('login')
