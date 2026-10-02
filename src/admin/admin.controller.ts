@@ -487,6 +487,7 @@ export class AdminController {
   // WEB ADMIN DASHBOARD UI (SERVED AT GET /admin)
   // -------------------------------------------------------------
 
+  @UseGuards(AdminAuthGuard)
   @Get()
   renderDashboard(@Res() res: any) {
     res.setHeader('Content-Type', 'text/html');

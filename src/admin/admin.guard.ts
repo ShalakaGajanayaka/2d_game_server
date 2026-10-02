@@ -8,12 +8,18 @@ export class AdminAuthGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest();
     const authHeader = request.headers.authorization;
+    let token: string | undefined;
 
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.replace('Bearer ', '').trim();
+    } else if (request.query && request.query.token) {
+      token = String(request.query.token).trim();
+    }
+
+    if (!token) {
       throw new UnauthorizedException('Admin token missing');
     }
 
-    const token = authHeader.replace('Bearer ', '').trim();
     const isAdmin = await this.redisService.get(`admin_token:${token}`);
 
     if (!isAdmin) {

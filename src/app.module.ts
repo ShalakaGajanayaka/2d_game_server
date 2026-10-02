@@ -26,9 +26,25 @@ import { PoolAuditLog } from './auth/entities/pool-audit-log.entity';
       useFactory: (config: ConfigService) => {
         const isProd = config.get<string>('NODE_ENV') === 'production';
         const dbPassword = config.get<string>('DB_PASSWORD');
+        const adminUsername = config.get<string>('ADMIN_USERNAME');
+        const adminPassword = config.get<string>('ADMIN_PASSWORD');
 
         if (isProd && (!dbPassword || dbPassword === '12345678' || dbPassword === 'postgres')) {
           throw new Error('SECURITY FATAL: Insecure or default DB_PASSWORD configured for production environment!');
+        }
+
+        if (isProd) {
+          const insecureAdminDefaults = ['admin123', '12345678', 'admin', 'password', 'root'];
+          if (
+            !adminUsername ||
+            !adminPassword ||
+            insecureAdminDefaults.includes(adminPassword.trim().toLowerCase()) ||
+            adminPassword.trim().length < 10
+          ) {
+            throw new Error(
+              'SECURITY FATAL: Insecure, missing, or weak ADMIN_USERNAME / ADMIN_PASSWORD configured for production environment!',
+            );
+          }
         }
 
         return {

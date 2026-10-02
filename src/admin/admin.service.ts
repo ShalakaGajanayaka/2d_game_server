@@ -1362,9 +1362,32 @@ export class AdminService implements OnModuleInit {
     const saved = await this.userRepo.save(user);
 
     try {
-      await this.redisService.del(`token:*`);
+      const tokens = await this.redisService.smembers(`user_sessions:${user.id}`);
+      if (tokens && tokens.length > 0) {
+        for (const tok of tokens) {
+          await this.redisService.del(`token:${tok}`);
+          await this.redisService.del(`token_user:${tok}`);
+        }
+      }
+      await this.redisService.del(`user_sessions:${user.id}`);
       await this.redisService.del(`user:${user.username.toLowerCase()}`);
-    } catch {}
+      if (user.email) {
+        await this.redisService.del(`user:${user.email.toLowerCase()}`);
+      }
+    } catch (err: any) {
+      this.logger.error(`Failed to purge Redis session keys for frozen user ${user.username}`, err);
+    }
+
+    try {
+      this.gameService.notifyUserBalance(
+        user,
+        Number(user.balance),
+        `Account suspended: ${reason || 'Suspended by Administrator'}`,
+        user.currency,
+      );
+    } catch (err: any) {
+      this.logger.warn(`Failed to notify user socket of freeze: ${err?.message}`);
+    }
 
     this.logger.warn(`User ${user.username} frozen by ${adminUser}: ${reason}`);
     return saved;
@@ -1379,6 +1402,22 @@ export class AdminService implements OnModuleInit {
     user.isFlaggedForReview = false;
     user.flaggedReason = null as any;
     const saved = await this.userRepo.save(user);
+
+    try {
+      await this.redisService.del(`user:${user.username.toLowerCase()}`);
+      if (user.email) {
+        await this.redisService.del(`user:${user.email.toLowerCase()}`);
+      }
+    } catch {}
+
+    try {
+      this.gameService.notifyUserBalance(
+        user,
+        Number(user.balance),
+        'Account unsuspended by Administrator.',
+        user.currency,
+      );
+    } catch {}
 
     this.logger.log(`User ${user.username} unfrozen by ${adminUser}`);
     return saved;
