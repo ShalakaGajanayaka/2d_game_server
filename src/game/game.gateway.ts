@@ -1,6 +1,6 @@
 import { WebSocketGateway, WebSocketServer, OnGatewayInit, OnGatewayConnection, SubscribeMessage } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { GameService } from './game.service';
+import { GameService, GameRoomType } from './game.service';
 import { RedisService } from '../redis/redis.service';
 import { forwardRef, Inject, Logger } from '@nestjs/common';
 
@@ -22,8 +22,9 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
   }
 
   handleConnection(client: Socket) {
-    // Send public game state to newly connected client
-    client.emit('gameState', this.gameService.getGameState(true));
+    // Send public game state to newly connected client (defaults to room:standard)
+    client.join('room:standard');
+    client.emit('gameState', this.gameService.getGameState(GameRoomType.STANDARD, true));
   }
 
   @SubscribeMessage('pingSync')
@@ -50,16 +51,31 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
         client.join(userRoom);
 
         // Also join user ID room for reliable UUID targeted notifications
+        let isMarketing = false;
         const userJson = await this.redisService.get(`user:${username.toLowerCase()}`);
         if (userJson) {
           const userObj = JSON.parse(userJson);
           if (userObj?.id) {
             client.join(`user:${userObj.id}`);
           }
+          if (userObj?.isMarketing) {
+            isMarketing = true;
+          }
         }
 
-        this.logger.log(`Socket [${client.id}] subscribed to private room: ${userRoom}`);
-        const response = { success: true, username };
+        // Dynamic Room Routing: If user is marketing, assign to room:marketing; otherwise room:standard
+        if (isMarketing) {
+          client.leave('room:standard');
+          client.join('room:marketing');
+          this.logger.log(`🎯 Marketing Streamer [${username}] routed to [room:marketing]`);
+          client.emit('gameState', this.gameService.getGameState(GameRoomType.MARKETING, true));
+        } else {
+          client.join('room:standard');
+          client.emit('gameState', this.gameService.getGameState(GameRoomType.STANDARD, true));
+        }
+
+        this.logger.log(`Socket [${client.id}] subscribed to private room: ${userRoom} (marketing: ${isMarketing})`);
+        const response = { success: true, username, isMarketing, room: isMarketing ? GameRoomType.MARKETING : GameRoomType.STANDARD };
         client.emit('userSubscribed', response);
         return response;
       } else {
@@ -81,6 +97,9 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
         this.logger.log(`Socket [${client.id}] left private room: ${room}`);
       }
     }
+    client.leave('room:marketing');
+    client.join('room:standard');
+    client.emit('gameState', this.gameService.getGameState(GameRoomType.STANDARD, true));
     client.emit('userUnsubscribed', { success: true });
     return { success: true };
   }

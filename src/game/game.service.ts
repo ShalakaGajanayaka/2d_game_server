@@ -9,6 +9,11 @@ export enum GameStatus {
   CRASHED = 'crashed',
 }
 
+export enum GameRoomType {
+  STANDARD = 'standard',
+  MARKETING = 'marketing',
+}
+
 export interface LiveBet {
   id: string;
   name: string;
@@ -33,43 +38,41 @@ const NAME_PREFIXES = [
   'matrix', 'hazard', 'star', 'pilot', 'pro', 'tiger', 'wolf', 'ghost', 'blade',
   'flash', 'titan', 'dragon', 'dark', 'iron', 'apex', 'zero', 'storm', 'nova',
   'cyber', 'vortex', 'silver', 'gold', 'alpha', 'omega', 'phantom', 'sonic',
-  'kasun', 'dinuka', 'roshan', 'chaminda', 'saman', 'nimal', 'ravi', 'tharindu'
+  'kasun', 'dinuka', 'roshan', 'chaminda', 'saman', 'nimal', 'ravi', 'tharindu',
+  'nuwan', 'ishan', 'damith', 'janaka', 'lahiru', 'malith', 'sachin', 'ashan',
 ];
 
 const NAME_SUFFIXES = [
   '**', '_99', '_lk', '_pro', '_vip', '_777', '_x', '_01', '_king', '_boss',
   '_run', '_fly', '91', '88', '77', '55', '33', '12', '44', '69', '007',
-  '_win', '_fast', '_top', '24', '10', '98', '03', '50', '21'
+  '_win', '_fast', '_top', '24', '10', '98', '03', '50', '21', '_usdt', '_sky',
 ];
 
 const BET_AMOUNTS = [
-  5, 10, 15, 20, 25, 30, 40, 50, 60, 75, 100, 150, 200, 250, 300, 500, 750, 1000, 1500, 2000
+  1, 2, 5, 10, 15, 20, 25, 30, 40, 50, 75, 100, 150, 200, 250, 500, 1000, 1500, 2000,
 ];
 
-@Injectable()
-export class GameService implements OnModuleInit {
-  private readonly logger = new Logger(GameService.name);
-  private server: Server;
-  
-  private status: GameStatus = GameStatus.WAITING;
-  private countdown: number = 10;
-  private currentMultiplier: number = 1.0;
-  private crashPoint: number = 1.0;
-  private startTime: number = 0;
-  private targetStartTime: number = 0;
-  private flightTickCount: number = 0;
-  private timer: NodeJS.Timeout | null = null;
-  private gameLoopTimer: NodeJS.Timeout | null = null;
-  private botStreamTimer: NodeJS.Timeout | null = null;
-  private currentRoundBets: LiveBet[] = [];
-  private pendingRoundBots: LiveBet[] = [];
+export class GameRoomState {
+  readonly roomType: GameRoomType;
+  status: GameStatus = GameStatus.WAITING;
+  countdown: number = 10;
+  currentMultiplier: number = 1.0;
+  crashPoint: number = 1.0;
+  startTime: number = 0;
+  targetStartTime: number = 0;
+  flightTickCount: number = 0;
+  timer: NodeJS.Timeout | null = null;
+  gameLoopTimer: NodeJS.Timeout | null = null;
+  botStreamTimer: NodeJS.Timeout | null = null;
+  currentRoundBets: LiveBet[] = [];
+  pendingRoundBots: LiveBet[] = [];
 
-  // Provably Fair variables (HMAC-SHA256 Stake / Roobet standard)
-  private roundNumber: number = 0;
-  private currentServerSeed: string = '';
-  private currentServerSeedHash: string = '';
-  private currentClientSeed: string = '0000000000000000000413e4592f3d37fa6104b0e32e31575e03b0c8b95da420';
-  private previousRound: {
+  // Provably Fair variables
+  roundNumber: number = 0;
+  currentServerSeed: string = '';
+  currentServerSeedHash: string = '';
+  currentClientSeed: string = '0000000000000000000413e4592f3d37fa6104b0e32e31575e03b0c8b95da420';
+  previousRound: {
     roundNumber: number;
     serverSeed: string;
     serverSeedHash: string;
@@ -77,18 +80,35 @@ export class GameService implements OnModuleInit {
     crashPoint: number;
   } | null = null;
 
-  // Company virtual pool variables (Universal Base Currency: USD $)
+  activeRealLiability: number = 0;
+  activeMarketingAutoWinBets: MarketingAutoWinBet[] = [];
+
+  constructor(roomType: GameRoomType) {
+    this.roomType = roomType;
+  }
+}
+
+@Injectable()
+export class GameService implements OnModuleInit {
+  private readonly logger = new Logger(GameService.name);
+  private server: Server;
+
+  // Multi-Room Engine state
+  private rooms: Map<GameRoomType, GameRoomState> = new Map();
+
+  // Company virtual pool variables (Universal Base Currency: USD $ - Standard Room strictly protected)
   private globalPool: number = 100.0;
   private pendingGlobalPool: number | null = null;
-  private activeRealLiability: number = 0;
   private companyProfitMargin: number = 0.05; // 5%
 
-  private crashCallbacks: Array<(crashPoint: number) => void> = [];
-  private roundStartCallbacks: Array<() => Promise<void> | void> = [];
-  private activeMarketingAutoWinBets: MarketingAutoWinBet[] = [];
+  private crashCallbacks: Array<(crashPoint: number, roomType: GameRoomType) => void> = [];
+  private roundStartCallbacks: Array<(roomType: GameRoomType) => Promise<void> | void> = [];
   private marketingAutoCashoutCallback: ((userId: string, betIndex: number, multiplier: number) => Promise<void>) | null = null;
 
-  constructor(private readonly redisService: RedisService) {}
+  constructor(private readonly redisService: RedisService) {
+    this.rooms.set(GameRoomType.STANDARD, new GameRoomState(GameRoomType.STANDARD));
+    this.rooms.set(GameRoomType.MARKETING, new GameRoomState(GameRoomType.MARKETING));
+  }
 
   async onModuleInit() {
     try {
@@ -107,19 +127,23 @@ export class GameService implements OnModuleInit {
         this.logger.log(`Restored Pending Global Pool from Redis: $${this.pendingGlobalPool} USD`);
       }
 
-      const savedRound = await this.redisService.get('game:round_number');
-      if (savedRound !== null && savedRound !== undefined && !isNaN(parseInt(savedRound, 10))) {
-        this.roundNumber = parseInt(savedRound, 10);
-      } else {
-        this.roundNumber = 1;
-        await this.redisService.set('game:round_number', '1');
-      }
+      // Initialize rounds for both rooms
+      for (const roomType of [GameRoomType.STANDARD, GameRoomType.MARKETING]) {
+        const room = this.rooms.get(roomType)!;
+        const savedRound = await this.redisService.get(`game:${roomType}:round_number`);
+        if (savedRound !== null && savedRound !== undefined && !isNaN(parseInt(savedRound, 10))) {
+          room.roundNumber = parseInt(savedRound, 10);
+        } else {
+          room.roundNumber = 1;
+          await this.redisService.set(`game:${roomType}:round_number`, '1');
+        }
 
-      this.currentServerSeed = crypto.randomBytes(32).toString('hex');
-      this.currentServerSeedHash = crypto.createHash('sha256').update(this.currentServerSeed).digest('hex');
-      this.logger.log(
-        `Initialized Provably Fair Engine. Round #${this.roundNumber}, Seed Hash: ${this.currentServerSeedHash.slice(0, 16)}...`,
-      );
+        room.currentServerSeed = crypto.randomBytes(32).toString('hex');
+        room.currentServerSeedHash = crypto.createHash('sha256').update(room.currentServerSeed).digest('hex');
+        this.logger.log(
+          `[Room: ${roomType.toUpperCase()}] Initialized Engine. Round #${room.roundNumber}, Seed Hash: ${room.currentServerSeedHash.slice(0, 16)}...`,
+        );
+      }
     } catch (err) {
       this.logger.warn('Failed to load global pool or provably fair state from Redis', err);
     }
@@ -127,9 +151,12 @@ export class GameService implements OnModuleInit {
 
   public setServer(server: Server) {
     this.server = server;
-    // Start the game loop when server is attached
-    if (this.status === GameStatus.WAITING && this.countdown === 10) {
-      this.startCountdown();
+    // Launch countdown timers for both rooms independently
+    for (const roomType of [GameRoomType.STANDARD, GameRoomType.MARKETING]) {
+      const room = this.rooms.get(roomType)!;
+      if (room.status === GameStatus.WAITING && room.countdown === 10) {
+        this.startCountdown(roomType);
+      }
     }
   }
 
@@ -144,8 +171,12 @@ export class GameService implements OnModuleInit {
     return this.pendingGlobalPool;
   }
 
-  public getActiveRealLiability(): number {
-    return this.activeRealLiability;
+  public getActiveRealLiability(roomType: GameRoomType = GameRoomType.STANDARD): number {
+    return this.rooms.get(roomType)?.activeRealLiability || 0;
+  }
+
+  public getRoom(roomType: GameRoomType = GameRoomType.STANDARD): GameRoomState {
+    return this.rooms.get(roomType) || this.rooms.get(GameRoomType.STANDARD)!;
   }
 
   public async setGlobalPool(amount: number): Promise<{
@@ -159,9 +190,8 @@ export class GameService implements OnModuleInit {
       throw new Error(`Cannot set pool ($${target} USD) below minimum safety floor $${GameService.MIN_POOL_FLOOR} USD`);
     }
 
-    // If game is actively flying (PLAYING), stage the change for the next round
-    // to preserve round immutability and prevent mid-flight forced crashes.
-    if (this.status === GameStatus.PLAYING) {
+    const standardRoom = this.rooms.get(GameRoomType.STANDARD)!;
+    if (standardRoom.status === GameStatus.PLAYING) {
       this.pendingGlobalPool = target;
       try {
         await this.redisService.set('game:pending_global_pool', this.pendingGlobalPool.toString());
@@ -173,7 +203,7 @@ export class GameService implements OnModuleInit {
       );
 
       if (this.server) {
-        this.server.emit('globalPoolUpdated', {
+        this.server.to('room:standard').emit('globalPoolUpdated', {
           globalPool: this.globalPool,
           pendingGlobalPool: this.pendingGlobalPool,
           timestamp: Date.now(),
@@ -188,7 +218,6 @@ export class GameService implements OnModuleInit {
       };
     }
 
-    // If round is WAITING or CRASHED, apply immediately
     this.globalPool = target;
     this.pendingGlobalPool = null;
     try {
@@ -200,7 +229,7 @@ export class GameService implements OnModuleInit {
     this.logger.log(`Global Pool updated immediately to: ${this.globalPool}`);
 
     if (this.server) {
-      this.server.emit('globalPoolUpdated', {
+      this.server.to('room:standard').emit('globalPoolUpdated', {
         globalPool: this.globalPool,
         pendingGlobalPool: null,
         timestamp: Date.now(),
@@ -215,12 +244,12 @@ export class GameService implements OnModuleInit {
     };
   }
 
-  public async registerRealBet(amount: number, isMarketing: boolean = false) {
-    if (!isMarketing) {
-      // 95% of real bet amount enters the liability buffer (5% house edge)
+  public async registerRealBet(amount: number, isMarketing: boolean = false, roomType: GameRoomType = GameRoomType.STANDARD) {
+    const room = this.rooms.get(roomType)!;
+    if (!isMarketing && roomType === GameRoomType.STANDARD) {
       this.globalPool += amount * (1 - this.companyProfitMargin);
-      if (this.status === GameStatus.WAITING || this.status === GameStatus.PLAYING) {
-        this.activeRealLiability += amount;
+      if (room.status === GameStatus.WAITING || room.status === GameStatus.PLAYING) {
+        room.activeRealLiability += amount;
       }
       try {
         await this.redisService.set('game:global_pool', this.globalPool.toFixed(2));
@@ -228,12 +257,13 @@ export class GameService implements OnModuleInit {
         this.logger.warn('Failed to persist global pool to Redis', err);
       }
     }
-    this.logger.log(`Real bet added: ${amount} (marketing: ${isMarketing}). Pool: ${this.globalPool.toFixed(2)}, Liability: ${this.activeRealLiability}`);
+    this.logger.log(`[Room: ${roomType}] Real bet added: ${amount} (marketing: ${isMarketing}). Pool: ${this.globalPool.toFixed(2)}, Liability: ${room.activeRealLiability}`);
   }
 
-  public async registerRealCashout(betAmount: number, winAmount: number, isMarketing: boolean = false) {
-    if (!isMarketing) {
-      this.activeRealLiability = Math.max(0, this.activeRealLiability - betAmount);
+  public async registerRealCashout(betAmount: number, winAmount: number, isMarketing: boolean = false, roomType: GameRoomType = GameRoomType.STANDARD) {
+    const room = this.rooms.get(roomType)!;
+    if (!isMarketing && roomType === GameRoomType.STANDARD) {
+      room.activeRealLiability = Math.max(0, room.activeRealLiability - betAmount);
       this.globalPool = Math.max(0, this.globalPool - winAmount);
       try {
         await this.redisService.set('game:global_pool', this.globalPool.toFixed(2));
@@ -241,62 +271,66 @@ export class GameService implements OnModuleInit {
         this.logger.warn('Failed to persist global pool to Redis', err);
       }
     }
-    this.logger.log(`Real cashout: Bet ${betAmount}, Win ${winAmount} (marketing: ${isMarketing}). Pool: ${this.globalPool.toFixed(2)}, Liability: ${this.activeRealLiability}`);
+    this.logger.log(`[Room: ${roomType}] Real cashout: Bet ${betAmount}, Win ${winAmount} (marketing: ${isMarketing}). Pool: ${this.globalPool.toFixed(2)}, Liability: ${room.activeRealLiability}`);
   }
 
-  public async cancelRealBet(amount: number, isMarketing: boolean = false) {
-    if (!isMarketing) {
+  public async cancelRealBet(amount: number, isMarketing: boolean = false, roomType: GameRoomType = GameRoomType.STANDARD) {
+    const room = this.rooms.get(roomType)!;
+    if (!isMarketing && roomType === GameRoomType.STANDARD) {
       this.globalPool = Math.max(0, this.globalPool - amount * (1 - this.companyProfitMargin));
-      this.activeRealLiability = Math.max(0, this.activeRealLiability - amount);
+      room.activeRealLiability = Math.max(0, room.activeRealLiability - amount);
       try {
         await this.redisService.set('game:global_pool', this.globalPool.toFixed(2));
       } catch (err) {
         this.logger.warn('Failed to persist global pool to Redis', err);
       }
     }
-    this.logger.log(`Real bet cancelled: ${amount} (marketing: ${isMarketing}). Pool: ${this.globalPool.toFixed(2)}, Liability: ${this.activeRealLiability}`);
+    this.logger.log(`[Room: ${roomType}] Real bet cancelled: ${amount} (marketing: ${isMarketing}). Pool: ${this.globalPool.toFixed(2)}, Liability: ${room.activeRealLiability}`);
   }
 
-  public getStatus(): GameStatus {
-    return this.status;
+  public getStatus(roomType: GameRoomType = GameRoomType.STANDARD): GameStatus {
+    return this.getRoom(roomType).status;
   }
 
-  public getCurrentMultiplier(): number {
-    return this.currentMultiplier;
+  public getCurrentMultiplier(roomType: GameRoomType = GameRoomType.STANDARD): number {
+    return this.getRoom(roomType).currentMultiplier;
   }
 
-  public getCrashPoint(): number {
-    return this.crashPoint;
+  public getCrashPoint(roomType: GameRoomType = GameRoomType.STANDARD): number {
+    return this.getRoom(roomType).crashPoint;
   }
 
-  public getStartTime(): number {
-    return this.startTime;
+  public getStartTime(roomType: GameRoomType = GameRoomType.STANDARD): number {
+    return this.getRoom(roomType).startTime;
   }
 
-  public addRealUserBet(bet: LiveBet) {
-    this.currentRoundBets.unshift(bet);
+  public addRealUserBet(bet: LiveBet, roomType: GameRoomType = GameRoomType.STANDARD) {
+    const room = this.getRoom(roomType);
+    room.currentRoundBets.unshift(bet);
     if (this.server) {
-      this.server.emit('newLiveBet', bet);
+      this.server.to(`room:${roomType}`).emit('newLiveBet', bet);
     }
   }
 
-  public removeRealUserBet(betId: string) {
-    this.currentRoundBets = this.currentRoundBets.filter(b => b.id !== betId);
+  public removeRealUserBet(betId: string, roomType: GameRoomType = GameRoomType.STANDARD) {
+    const room = this.getRoom(roomType);
+    room.currentRoundBets = room.currentRoundBets.filter(b => b.id !== betId);
     this.removeMarketingAutoWinBet(betId);
     if (this.server) {
-      this.server.emit('betCancelled', { id: betId });
+      this.server.to(`room:${roomType}`).emit('betCancelled', { id: betId });
     }
   }
 
-  public markRealUserCashout(betId: string, multiplier: number, winAmount: number) {
-    const bet = this.currentRoundBets.find(b => b.id === betId);
+  public markRealUserCashout(betId: string, multiplier: number, winAmount: number, roomType: GameRoomType = GameRoomType.STANDARD) {
+    const room = this.getRoom(roomType);
+    const bet = room.currentRoundBets.find(b => b.id === betId);
     if (bet) {
       bet.cashedOut = true;
       bet.cashedOutMultiplier = multiplier;
     }
     this.removeMarketingAutoWinBet(betId);
     if (this.server) {
-      this.server.emit('betCashedOut', {
+      this.server.to(`room:${roomType}`).emit('betCashedOut', {
         id: betId,
         multiplier,
         winAmount,
@@ -306,9 +340,13 @@ export class GameService implements OnModuleInit {
 
   public hasActiveBet(username: string): boolean {
     if (!username) return false;
-    return this.currentRoundBets.some(
-      b => b.name?.toLowerCase() === username.toLowerCase() && !b.cashedOut
-    );
+    const cleanUser = username.toLowerCase();
+    for (const room of this.rooms.values()) {
+      if (room.currentRoundBets.some(b => b.name?.toLowerCase() === cleanUser && !b.cashedOut)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   public registerMarketingAutoCashoutCallback(cb: (userId: string, betIndex: number, multiplier: number) => Promise<void>) {
@@ -316,76 +354,79 @@ export class GameService implements OnModuleInit {
   }
 
   public registerMarketingAutoWinBet(bet: MarketingAutoWinBet) {
-    this.activeMarketingAutoWinBets.push(bet);
-    this.logger.log(`[Marketing] Registered auto-win bet for user ${bet.username} (Slot ${bet.betIndex}, Amount: ${bet.amount})`);
+    const room = this.rooms.get(GameRoomType.MARKETING)!;
+    room.activeMarketingAutoWinBets.push(bet);
+    this.logger.log(`[Marketing Room] Registered auto-win bet for user ${bet.username} (Slot ${bet.betIndex}, Amount: ${bet.amount})`);
   }
 
   public removeMarketingAutoWinBet(betId: string) {
-    this.activeMarketingAutoWinBets = this.activeMarketingAutoWinBets.filter(b => b.betId !== betId);
+    for (const room of this.rooms.values()) {
+      room.activeMarketingAutoWinBets = room.activeMarketingAutoWinBets.filter(b => b.betId !== betId);
+    }
   }
 
-  public registerCrashCallback(cb: (crashPoint: number) => void) {
+  public registerCrashCallback(cb: (crashPoint: number, roomType: GameRoomType) => void) {
     this.crashCallbacks.push(cb);
   }
 
-  public registerRoundStartCallback(cb: () => Promise<void> | void) {
+  public registerRoundStartCallback(cb: (roomType: GameRoomType) => Promise<void> | void) {
     this.roundStartCallbacks.push(cb);
   }
 
-  private generateUniqueName(index: number): string {
+  private generateUniqueName(roomType: GameRoomType, index: number): string {
     const prefix = NAME_PREFIXES[Math.floor(Math.random() * NAME_PREFIXES.length)];
     const suffix = NAME_SUFFIXES[Math.floor(Math.random() * NAME_SUFFIXES.length)];
     return `${prefix}${suffix}`;
   }
 
-  private generateRoundBots(): LiveBet[] {
+  private generateRoundBots(roomType: GameRoomType): LiveBet[] {
     // Generate between 120 and 260 bots per round (100 - 300 range)
     const count = Math.floor(Math.random() * 141) + 120;
     const bots: LiveBet[] = [];
     const usedNames = new Set<string>();
 
     for (let i = 0; i < count; i++) {
-      let name = this.generateUniqueName(i);
+      let name = this.generateUniqueName(roomType, i);
       let attempts = 0;
       while (usedNames.has(name) && attempts < 10) {
-        name = `${NAME_PREFIXES[Math.floor(Math.random() * NAME_PREFIXES.length)]}_${Math.floor(Math.random() * 900 + 100)}`;
         attempts++;
+        name = this.generateUniqueName(roomType, i + attempts * 50);
       }
       usedNames.add(name);
 
-      // Bet amounts: 65% smaller ($5-$50), 25% medium ($60-$250), 10% high-rollers ($300-$2000)
-      const rollAmount = Math.random();
-      let bet: number;
-      if (rollAmount < 0.65) {
-        bet = [5, 10, 15, 20, 25, 30, 40, 50][Math.floor(Math.random() * 8)];
-      } else if (rollAmount < 0.90) {
-        bet = [60, 75, 100, 150, 200, 250][Math.floor(Math.random() * 6)];
-      } else {
-        bet = [300, 500, 750, 1000, 1500, 2000][Math.floor(Math.random() * 6)];
-      }
+      const betAmount = BET_AMOUNTS[Math.floor(Math.random() * BET_AMOUNTS.length)];
 
-      // Target multiplier distribution:
-      // 40% safe (1.10x - 1.95x)
-      // 35% medium (2.00x - 4.50x)
-      // 15% bold (4.50x - 12.00x)
-      // 10% risky (12.00x - 40.00x)
-      const rollTarget = Math.random();
-      let target: number;
-      if (rollTarget < 0.40) {
-        target = 1.10 + Math.random() * 0.85;
-      } else if (rollTarget < 0.75) {
-        target = 2.00 + Math.random() * 2.50;
-      } else if (rollTarget < 0.90) {
-        target = 4.50 + Math.random() * 7.50;
+      let targetMultiplier: number;
+      const roll = Math.random();
+      if (roomType === GameRoomType.MARKETING) {
+        // Streamer room has more aggressive, exciting bot targets
+        if (roll < 0.35) {
+          targetMultiplier = parseFloat((1.15 + Math.random() * 0.85).toFixed(2));
+        } else if (roll < 0.70) {
+          targetMultiplier = parseFloat((2.00 + Math.random() * 3.00).toFixed(2));
+        } else if (roll < 0.90) {
+          targetMultiplier = parseFloat((5.00 + Math.random() * 7.00).toFixed(2));
+        } else {
+          targetMultiplier = parseFloat((12.00 + Math.random() * 25.00).toFixed(2));
+        }
       } else {
-        target = 12.00 + Math.random() * 28.00;
+        // Standard room realistic bot targets
+        if (roll < 0.45) {
+          targetMultiplier = parseFloat((1.10 + Math.random() * 0.70).toFixed(2));
+        } else if (roll < 0.80) {
+          targetMultiplier = parseFloat((1.80 + Math.random() * 1.70).toFixed(2));
+        } else if (roll < 0.95) {
+          targetMultiplier = parseFloat((3.50 + Math.random() * 4.50).toFixed(2));
+        } else {
+          targetMultiplier = parseFloat((8.00 + Math.random() * 12.00).toFixed(2));
+        }
       }
 
       bots.push({
-        id: `bot_${i}_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+        id: `bot_${roomType}_${i}_${Date.now()}`,
         name,
-        bet,
-        targetMultiplier: parseFloat(target.toFixed(2)),
+        bet: betAmount,
+        targetMultiplier,
         cashedOut: false,
       });
     }
@@ -393,9 +434,10 @@ export class GameService implements OnModuleInit {
     return bots;
   }
 
-  private startCountdown() {
-    // If a pool update was staged during the previous flight, commit it now before the new round begins!
-    if (this.pendingGlobalPool !== null) {
+  public startCountdown(roomType: GameRoomType) {
+    const room = this.rooms.get(roomType)!;
+
+    if (roomType === GameRoomType.STANDARD && this.pendingGlobalPool !== null) {
       this.globalPool = this.pendingGlobalPool;
       this.logger.log(`🚀 Applied staged pool to Global Pool for new round: $${this.globalPool} USD`);
       this.pendingGlobalPool = null;
@@ -406,7 +448,7 @@ export class GameService implements OnModuleInit {
         this.logger.warn('Failed to persist new global pool on round start', err);
       }
       if (this.server) {
-        this.server.emit('globalPoolUpdated', {
+        this.server.to('room:standard').emit('globalPoolUpdated', {
           globalPool: this.globalPool,
           pendingGlobalPool: null,
           timestamp: Date.now(),
@@ -414,164 +456,161 @@ export class GameService implements OnModuleInit {
       }
     }
 
-    this.status = GameStatus.WAITING;
-    this.countdown = 10;
-    this.targetStartTime = Date.now() + 10000;
-    this.currentMultiplier = 1.0;
-    this.activeRealLiability = 0; // Reset for the new round
+    room.status = GameStatus.WAITING;
+    room.countdown = 10;
+    room.targetStartTime = Date.now() + 10000;
+    room.currentMultiplier = 1.0;
+    room.activeRealLiability = 0;
 
     // Advance Provably Fair round commitment
-    this.roundNumber++;
-    this.currentServerSeed = crypto.randomBytes(32).toString('hex');
-    this.currentServerSeedHash = crypto.createHash('sha256').update(this.currentServerSeed).digest('hex');
-    this.crashPoint = this.calculateProvablyFairCrashPoint(
-      this.currentServerSeed,
-      this.currentClientSeed,
-      this.roundNumber,
-    );
+    room.roundNumber++;
+    room.currentServerSeed = crypto.randomBytes(32).toString('hex');
+    room.currentServerSeedHash = crypto.createHash('sha256').update(room.currentServerSeed).digest('hex');
+
+    if (roomType === GameRoomType.MARKETING) {
+      room.crashPoint = this.generateMarketingCrashPoint();
+    } else {
+      room.crashPoint = this.calculateProvablyFairCrashPoint(
+        room.currentServerSeed,
+        room.currentClientSeed,
+        room.roundNumber,
+      );
+    }
 
     try {
-      this.redisService.set('game:round_number', this.roundNumber.toString());
+      this.redisService.set(`game:${roomType}:round_number`, room.roundNumber.toString());
       this.redisService.set(
-        `provably_fair:round:${this.roundNumber}:commitment`,
+        `provably_fair:${roomType}:round:${room.roundNumber}:commitment`,
         JSON.stringify({
-          roundNumber: this.roundNumber,
-          serverSeedHash: this.currentServerSeedHash,
-          clientSeed: this.currentClientSeed,
+          roundNumber: room.roundNumber,
+          serverSeedHash: room.currentServerSeedHash,
+          clientSeed: room.currentClientSeed,
           createdAt: Date.now(),
         }),
         86400 * 3,
       );
     } catch (err) {
-      this.logger.warn('Failed to persist Provably Fair commitment to Redis', err);
+      this.logger.warn(`Failed to persist Provably Fair commitment for ${roomType} to Redis`, err);
     }
 
     this.logger.log(
-      `[Provably Fair] Round #${this.roundNumber} committed. ServerSeedHash: ${this.currentServerSeedHash.slice(0, 16)}... | Pre-determined CrashPoint: ${this.crashPoint}x`,
+      `[Room: ${roomType.toUpperCase()}] Round #${room.roundNumber} committed. ServerSeedHash: ${room.currentServerSeedHash.slice(0, 16)}... | CrashPoint: ${room.crashPoint}x`,
     );
-    
-    // Generate pool of 120 - 260 bots
-    const allBots = this.generateRoundBots();
-    // Seed initial 15-20 early bets so list starts bustling
+
+    // Generate independent bot pool (120 - 260 bots)
+    const allBots = this.generateRoundBots(roomType);
     const initialCount = Math.floor(Math.random() * 8) + 14;
-    this.currentRoundBets = allBots.slice(0, initialCount);
-    this.pendingRoundBots = allBots.slice(initialCount);
+    room.currentRoundBets = allBots.slice(0, initialCount);
+    room.pendingRoundBots = allBots.slice(initialCount);
 
-    this.logger.log(`Starting countdown. Initial bets: ${this.currentRoundBets.length}, Total targeted: ${allBots.length}`);
-    this.broadcastState(true); // Broadcast initial state WITH initial bets
+    this.logger.log(`[Room: ${roomType.toUpperCase()}] Starting countdown. Initial bots: ${room.currentRoundBets.length}, Total targeted: ${allBots.length}`);
+    this.broadcastState(roomType, true);
 
-    // Authoritative activation of queued bets staged during the previous flight
+    // Authoritative activation of queued bets for this room
     for (const cb of this.roundStartCallbacks) {
       try {
-        const res = cb();
-        if (res instanceof Promise) res.catch(err => this.logger.error('Error executing round start async callback', err));
+        const res = cb(roomType);
+        if (res instanceof Promise) res.catch(err => this.logger.error(`Error executing round start async callback for ${roomType}`, err));
       } catch (err) {
-        this.logger.error('Error executing round start callback', err);
+        this.logger.error(`Error executing round start callback for ${roomType}`, err);
       }
     }
 
-    if (this.timer) clearInterval(this.timer);
-    if (this.botStreamTimer) clearInterval(this.botStreamTimer);
+    if (room.timer) clearInterval(room.timer);
+    if (room.botStreamTimer) clearInterval(room.botStreamTimer);
 
-    // Stream incoming batches every 350ms to simulate a packed, lively casino room
-    this.botStreamTimer = setInterval(() => {
-      if (this.status === GameStatus.WAITING && this.pendingRoundBots.length > 0) {
-        // Stream batches of 4 - 10 bets per burst
+    // Stream incoming bot batches every 350ms to simulate a packed casino room
+    room.botStreamTimer = setInterval(() => {
+      if (room.status === GameStatus.WAITING && room.pendingRoundBots.length > 0) {
         const batchSize = Math.min(
-          this.pendingRoundBots.length,
-          Math.floor(Math.random() * 7) + 4
+          room.pendingRoundBots.length,
+          Math.floor(Math.random() * 7) + 4,
         );
-        const batch = this.pendingRoundBots.splice(0, batchSize);
+        const batch = room.pendingRoundBots.splice(0, batchSize);
         if (batch.length > 0) {
-          this.currentRoundBets.push(...batch);
+          room.currentRoundBets.push(...batch);
           if (this.server) {
-            this.server.emit('newLiveBetsBatch', batch);
+            this.server.to(`room:${roomType}`).emit('newLiveBetsBatch', batch);
           }
         }
-      } else if (this.pendingRoundBots.length === 0 && this.botStreamTimer) {
-        clearInterval(this.botStreamTimer);
+      } else if (room.pendingRoundBots.length === 0 && room.botStreamTimer) {
+        clearInterval(room.botStreamTimer);
       }
     }, 350);
 
-    this.timer = setInterval(() => {
-      this.countdown--;
-      this.broadcastState(false); // Broadcast lightweight countdown tick (no heavy bets array)
-      
-      // Flush any remaining pending bots so everyone is in right before flight
-      if (this.countdown <= 1) {
-        if (this.pendingRoundBots.length > 0) {
-          const remainingBatch = this.pendingRoundBots.splice(0);
-          this.currentRoundBets.push(...remainingBatch);
+    room.timer = setInterval(() => {
+      room.countdown--;
+      this.broadcastState(roomType, false);
+
+      if (room.countdown <= 1) {
+        if (room.pendingRoundBots.length > 0) {
+          const remainingBatch = room.pendingRoundBots.splice(0);
+          room.currentRoundBets.push(...remainingBatch);
           if (this.server) {
-            this.server.emit('newLiveBetsBatch', remainingBatch);
+            this.server.to(`room:${roomType}`).emit('newLiveBetsBatch', remainingBatch);
           }
         }
       }
 
-      if (this.countdown <= 0) {
-        clearInterval(this.timer!);
-        if (this.botStreamTimer) clearInterval(this.botStreamTimer);
-        this.startGame();
+      if (room.countdown <= 0) {
+        clearInterval(room.timer!);
+        if (room.botStreamTimer) clearInterval(room.botStreamTimer);
+        this.startGame(roomType);
       }
     }, 1000);
   }
 
-  private startGame() {
-    this.status = GameStatus.PLAYING;
-    // Crash point was pre-determined and committed prior to flight
-    if (!this.crashPoint || this.crashPoint < 1.0) {
-      this.crashPoint = this.generateCrashPoint();
+  private startGame(roomType: GameRoomType) {
+    const room = this.rooms.get(roomType)!;
+    room.status = GameStatus.PLAYING;
+    if (!room.crashPoint || room.crashPoint < 1.0) {
+      room.crashPoint = roomType === GameRoomType.MARKETING ? this.generateMarketingCrashPoint() : this.generateCrashPoint();
     }
-    this.currentMultiplier = 1.0;
-    this.startTime = Date.now();
-    this.flightTickCount = 0;
-    
-    // Schedule dramatic close-call auto cashout points for any active marketing bets
-    for (const mBet of this.activeMarketingAutoWinBets) {
-      const winFactor = 0.82 + Math.random() * 0.08; // 82% to 90% of crash multiplier
-      mBet.targetAutoCashout = Math.max(1.20, parseFloat((this.crashPoint * winFactor).toFixed(2)));
-      this.logger.log(`[Marketing] Auto-Win scheduled for ${mBet.username} at ${mBet.targetAutoCashout}x (Crash: ${this.crashPoint}x)`);
-    }
+    room.currentMultiplier = 1.0;
+    room.startTime = Date.now();
+    room.flightTickCount = 0;
 
-    if (this.botStreamTimer) clearInterval(this.botStreamTimer);
-    // Ensure all pending bets are in
-    if (this.pendingRoundBots.length > 0) {
-      this.currentRoundBets.push(...this.pendingRoundBots.splice(0));
+    // Schedule dramatic close-call auto cashout points for any active marketing bets in this room
+    for (const mBet of room.activeMarketingAutoWinBets) {
+      const winFactor = 0.82 + Math.random() * 0.08;
+      mBet.targetAutoCashout = Math.max(1.20, parseFloat((room.crashPoint * winFactor).toFixed(2)));
+      this.logger.log(`[Marketing Auto-Win] Scheduled for ${mBet.username} at ${mBet.targetAutoCashout}x (Crash: ${room.crashPoint}x)`);
     }
 
-    this.logger.log(`Game started. Total bets: ${this.currentRoundBets.length}, Crash point: ${this.crashPoint}`);
-    
-    // Broadcast the START event so clients can begin animation syncing to startTime
-    this.broadcastState(false);
+    if (room.botStreamTimer) clearInterval(room.botStreamTimer);
+    if (room.pendingRoundBots.length > 0) {
+      room.currentRoundBets.push(...room.pendingRoundBots.splice(0));
+    }
 
-    if (this.gameLoopTimer) clearInterval(this.gameLoopTimer);
-    
-    // Server checks for crash condition and bot cashouts 20 times a second
-    this.gameLoopTimer = setInterval(() => {
-      const elapsedSeconds = (Date.now() - this.startTime) / 1000;
-      // Industry standard smooth exponential progression: e^(0.095 * t) (~7.3s to reach 2.00x)
-      this.currentMultiplier = Math.max(1.0, Math.exp(0.095 * elapsedSeconds));
+    this.logger.log(`[Room: ${roomType.toUpperCase()}] Flight started. Total bets: ${room.currentRoundBets.length}, Crash point: ${room.crashPoint}`);
+    this.broadcastState(roomType, false);
 
-      this.flightTickCount++;
-      // Every 250ms (5 ticks of 50ms), emit lightweight flight sync heartbeat
-      if (this.flightTickCount % 5 === 0 && this.server) {
-        this.server.emit('flightSync', {
-          multiplier: parseFloat(this.currentMultiplier.toFixed(2)),
+    if (room.gameLoopTimer) clearInterval(room.gameLoopTimer);
+
+    room.gameLoopTimer = setInterval(() => {
+      const elapsedSeconds = (Date.now() - room.startTime) / 1000;
+      room.currentMultiplier = Math.max(1.0, Math.exp(0.095 * elapsedSeconds));
+      room.flightTickCount++;
+
+      // Every 250ms (5 ticks), emit lightweight heartbeat
+      if (room.flightTickCount % 5 === 0 && this.server) {
+        this.server.to(`room:${roomType}`).emit('flightSync', {
+          multiplier: parseFloat(room.currentMultiplier.toFixed(2)),
           elapsedSeconds: parseFloat(elapsedSeconds.toFixed(2)),
-          startTime: this.startTime,
+          startTime: room.startTime,
           serverTime: Date.now(),
         });
       }
 
       // Check for bot cashouts
-      for (const bot of this.currentRoundBets) {
-        if (!bot.cashedOut && this.currentMultiplier >= bot.targetMultiplier && bot.targetMultiplier < this.crashPoint) {
+      for (const bot of room.currentRoundBets) {
+        if (!bot.cashedOut && room.currentMultiplier >= bot.targetMultiplier && bot.targetMultiplier < room.crashPoint) {
           bot.cashedOut = true;
           bot.cashedOutMultiplier = bot.targetMultiplier;
           const winAmount = parseFloat((bot.bet * bot.cashedOutMultiplier).toFixed(2));
-          
+
           if (this.server) {
-            this.server.emit('betCashedOut', {
+            this.server.to(`room:${roomType}`).emit('betCashedOut', {
               id: bot.id,
               multiplier: bot.cashedOutMultiplier,
               winAmount,
@@ -580,96 +619,111 @@ export class GameService implements OnModuleInit {
         }
       }
 
-      // Check for marketing auto-win cashouts (guaranteed win before crash)
-      if (this.activeMarketingAutoWinBets.length > 0) {
-        for (let i = this.activeMarketingAutoWinBets.length - 1; i >= 0; i--) {
-          const mBet = this.activeMarketingAutoWinBets[i];
-          if (mBet.targetAutoCashout && this.currentMultiplier >= mBet.targetAutoCashout && this.currentMultiplier < this.crashPoint) {
-            this.activeMarketingAutoWinBets.splice(i, 1);
-            const cashoutMultiplier = parseFloat(this.currentMultiplier.toFixed(2));
-            this.logger.log(`[Marketing] Triggering auto-cashout for ${mBet.username} at ${cashoutMultiplier}x`);
+      // Check for marketing auto-win cashouts (if enabled)
+      if (room.activeMarketingAutoWinBets.length > 0) {
+        for (let i = room.activeMarketingAutoWinBets.length - 1; i >= 0; i--) {
+          const mBet = room.activeMarketingAutoWinBets[i];
+          if (mBet.targetAutoCashout && room.currentMultiplier >= mBet.targetAutoCashout && room.currentMultiplier < room.crashPoint) {
+            room.activeMarketingAutoWinBets.splice(i, 1);
+            const cashoutMultiplier = parseFloat(room.currentMultiplier.toFixed(2));
+            this.logger.log(`[Marketing Room] Triggering auto-cashout for ${mBet.username} at ${cashoutMultiplier}x`);
             if (this.marketingAutoCashoutCallback) {
               this.marketingAutoCashoutCallback(mBet.userId, mBet.betIndex, cashoutMultiplier).catch(err => {
-                this.logger.error(`[Marketing] Error executing auto-cashout for ${mBet.username}`, err);
+                this.logger.error(`[Marketing Room] Error executing auto-cashout for ${mBet.username}`, err);
               });
             }
           }
         }
       }
 
-      if (this.currentMultiplier >= this.crashPoint) {
-        this.crash();
+      if (room.currentMultiplier >= room.crashPoint) {
+        this.crash(roomType);
       }
-    }, 50); 
+    }, 50);
   }
 
-  private crash() {
-    if (this.gameLoopTimer) clearInterval(this.gameLoopTimer);
-    
-    this.status = GameStatus.CRASHED;
-    this.currentMultiplier = this.crashPoint;
+  private crash(roomType: GameRoomType) {
+    const room = this.rooms.get(roomType)!;
+    if (room.gameLoopTimer) clearInterval(room.gameLoopTimer);
 
-    // Record Provably Fair revealed outcome
-    this.previousRound = {
-      roundNumber: this.roundNumber,
-      serverSeed: this.currentServerSeed,
-      serverSeedHash: this.currentServerSeedHash,
-      clientSeed: this.currentClientSeed,
-      crashPoint: this.crashPoint,
+    room.status = GameStatus.CRASHED;
+    room.currentMultiplier = room.crashPoint;
+
+    room.previousRound = {
+      roundNumber: room.roundNumber,
+      serverSeed: room.currentServerSeed,
+      serverSeedHash: room.currentServerSeedHash,
+      clientSeed: room.currentClientSeed,
+      crashPoint: room.crashPoint,
     };
 
     try {
       this.redisService.set(
-        `provably_fair:round:${this.roundNumber}:revealed`,
-        JSON.stringify(this.previousRound),
-        86400 * 7, // 7 days retention
+        `provably_fair:${roomType}:round:${room.roundNumber}:revealed`,
+        JSON.stringify(room.previousRound),
+        86400 * 7,
       );
     } catch (err) {
-      this.logger.warn('Failed to store revealed provably fair round to Redis', err);
+      this.logger.warn(`Failed to store revealed provably fair round for ${roomType} to Redis`, err);
     }
-    
+
     this.logger.log(
-      `[Provably Fair] Round #${this.roundNumber} crashed at ${this.crashPoint}x. ServerSeed revealed: ${this.currentServerSeed.slice(0, 16)}...`,
+      `[Room: ${roomType.toUpperCase()}] Round #${room.roundNumber} crashed at ${room.crashPoint}x. ServerSeed revealed: ${room.currentServerSeed.slice(0, 16)}...`,
     );
-    this.broadcastState(false);
+    this.broadcastState(roomType, false);
 
     // Trigger crash callbacks for authoritative round settlement
     for (const cb of this.crashCallbacks) {
       try {
-        cb(this.crashPoint);
+        cb(room.crashPoint, roomType);
       } catch (err) {
-        this.logger.error('Error executing crash callback', err);
+        this.logger.error(`Error executing crash callback for ${roomType}`, err);
       }
     }
 
     // Wait 3 seconds before next round
     setTimeout(() => {
-      this.startCountdown();
+      this.startCountdown(roomType);
     }, 3000);
   }
 
   public generateCrashPoint(): number {
+    const standardRoom = this.rooms.get(GameRoomType.STANDARD)!;
     return this.calculateProvablyFairCrashPoint(
-      this.currentServerSeed,
-      this.currentClientSeed,
-      this.roundNumber,
+      standardRoom.currentServerSeed,
+      standardRoom.currentClientSeed,
+      standardRoom.roundNumber,
     );
   }
 
   /**
-   * Industry-Standard Provably Fair Crash Calculation (HMAC-SHA256)
-   * Compatible with Stake, Roobet, and Spribe Aviator algorithms.
-   * Return to Player (RTP): 97.00% (3.00% House Edge via 1-in-33 instant crash).
-   * 
-   * Pre-image resistant, collision resistant, mathematically deterministic,
-   * and verifiably independent of active bets or house liabilities.
+   * Generates high-entertainment crash points for Marketing Studio Room.
+   * Realistic Distribution:
+   * - 15% natural early losses: 1.15x - 1.85x
+   * - 55% high solid runs: 3.50x - 8.00x
+   * - 22% huge exciting runs: 8.00x - 20.00x
+   * - 8% epic moonshots: 20.00x - 65.00x
    */
+  public generateMarketingCrashPoint(): number {
+    const roll = Math.random();
+    let point: number;
+    if (roll < 0.15) {
+      point = 1.15 + Math.random() * 0.70;
+    } else if (roll < 0.70) {
+      point = 3.50 + Math.random() * 4.50;
+    } else if (roll < 0.92) {
+      point = 8.00 + Math.random() * 12.00;
+    } else {
+      point = 20.00 + Math.random() * 45.00;
+    }
+    return parseFloat(point.toFixed(2));
+  }
+
   public calculateProvablyFairCrashPoint(serverSeed: string, clientSeed: string, nonce: number): number {
     const hmac = crypto.createHmac('sha256', serverSeed);
     hmac.update(`${clientSeed}:${nonce}`);
     const hash = hmac.digest('hex');
 
-    // Convert first 52 bits (13 hex characters) to integer
     const h = parseInt(hash.slice(0, 13), 16);
     const e = Math.pow(2, 52);
 
@@ -678,56 +732,59 @@ export class GameService implements OnModuleInit {
       return 1.00;
     }
 
-    // Exponential multiplier formula
     const rawMultiplier = (100 * e - h) / (e - h) / 100;
     const crashPoint = Math.floor(rawMultiplier * 100) / 100;
     return Math.max(1.01, crashPoint);
   }
 
-  public getProvablyFairRound() {
+  public getProvablyFairRound(roomType: GameRoomType = GameRoomType.STANDARD) {
+    const room = this.getRoom(roomType);
     return {
       currentRound: {
-        roundNumber: this.roundNumber,
-        serverSeedHash: this.currentServerSeedHash,
-        clientSeed: this.currentClientSeed,
-        serverSeed: this.status === GameStatus.CRASHED ? this.currentServerSeed : 'HIDDEN_UNTIL_ROUND_ENDS',
+        roundNumber: room.roundNumber,
+        serverSeedHash: room.currentServerSeedHash,
+        clientSeed: room.currentClientSeed,
+        serverSeed: room.status === GameStatus.CRASHED ? room.currentServerSeed : 'HIDDEN_UNTIL_ROUND_ENDS',
       },
-      previousRound: this.previousRound,
+      previousRound: room.previousRound,
     };
   }
 
-  public async getHistoricalRoundAudit(roundNumber: number) {
-    if (this.previousRound && this.previousRound.roundNumber === roundNumber) {
-      return this.previousRound;
+  public async getHistoricalRoundAudit(roundNumber: number, roomType: GameRoomType = GameRoomType.STANDARD) {
+    const room = this.getRoom(roomType);
+    if (room.previousRound && room.previousRound.roundNumber === roundNumber) {
+      return room.previousRound;
     }
     try {
-      const data = await this.redisService.get(`provably_fair:round:${roundNumber}:revealed`);
+      const data = await this.redisService.get(`provably_fair:${roomType}:round:${roundNumber}:revealed`);
       if (data) return JSON.parse(data);
     } catch {}
     return null;
   }
 
-  private broadcastState(includeFullBets: boolean = true) {
+  private broadcastState(roomType: GameRoomType, includeFullBets: boolean = true) {
     if (this.server) {
-      this.server.emit('gameState', this.getGameState(includeFullBets));
+      this.server.to(`room:${roomType}`).emit('gameState', this.getGameState(roomType, includeFullBets));
     }
   }
 
-  public getGameState(includeFullBets: boolean = true) {
+  public getGameState(roomType: GameRoomType = GameRoomType.STANDARD, includeFullBets: boolean = true) {
+    const room = this.getRoom(roomType);
     return {
-      status: this.status,
-      countdown: this.countdown,
-      targetStartTime: this.targetStartTime,
-      currentMultiplier: parseFloat(this.currentMultiplier.toFixed(2)),
-      startTime: this.startTime,
-      crashPoint: this.status === GameStatus.CRASHED ? this.crashPoint : null,
+      room: roomType,
+      status: room.status,
+      countdown: room.countdown,
+      targetStartTime: room.targetStartTime,
+      currentMultiplier: parseFloat(room.currentMultiplier.toFixed(2)),
+      startTime: room.startTime,
+      crashPoint: room.status === GameStatus.CRASHED ? room.crashPoint : null,
       serverTime: Date.now(),
-      bets: includeFullBets ? this.currentRoundBets : null,
+      bets: includeFullBets ? room.currentRoundBets : null,
       provablyFair: {
-        roundNumber: this.roundNumber,
-        serverSeedHash: this.currentServerSeedHash,
-        clientSeed: this.currentClientSeed,
-        serverSeed: this.status === GameStatus.CRASHED ? this.currentServerSeed : null,
+        roundNumber: room.roundNumber,
+        serverSeedHash: room.currentServerSeedHash,
+        clientSeed: room.currentClientSeed,
+        serverSeed: room.status === GameStatus.CRASHED ? room.currentServerSeed : null,
       },
     };
   }
@@ -742,7 +799,6 @@ export class GameService implements OnModuleInit {
       const username = typeof target === 'string' ? target : (target?.username || '');
       const userId = typeof target === 'object' ? target?.id : undefined;
 
-      // Privacy: Clean sanitized payload - do NOT leak email across the wire
       const payload = {
         username,
         balance,
@@ -751,7 +807,6 @@ export class GameService implements OnModuleInit {
         timestamp: Date.now(),
       };
 
-      // Deliver strictly to private user rooms (No public broadcast)
       const targetRooms = new Set<string>();
       if (userId) targetRooms.add(`user:${userId}`);
       if (username) targetRooms.add(`user:${username.toLowerCase()}`);
@@ -764,7 +819,6 @@ export class GameService implements OnModuleInit {
 
   public notifyNewDeposit(deposit: any) {
     if (this.server) {
-      // Deliver deposit notification strictly to authorized Admin Room
       this.server.to('admin_room').emit('newDepositSubmitted', {
         deposit,
         timestamp: Date.now(),
@@ -774,7 +828,6 @@ export class GameService implements OnModuleInit {
 
   public notifyNewWithdrawal(withdrawal: any) {
     if (this.server) {
-      // Deliver withdrawal & bank account details strictly to authorized Admin Room
       this.server.to('admin_room').emit('newWithdrawalSubmitted', {
         withdrawal,
         timestamp: Date.now(),
