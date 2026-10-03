@@ -587,7 +587,7 @@ export class AuthService implements OnModuleInit {
     let maxBet = 20000.0;
     if (['USD', 'USDT', 'EUR', 'GBP'].includes(userCurrency)) {
       minBet = 1.0;
-      maxBet = 2000.0;
+      maxBet = 500.0;
     } else if (userCurrency === 'AED') {
       minBet = 5.0;
       maxBet = 8000.0;
