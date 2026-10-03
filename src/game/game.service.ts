@@ -636,6 +636,7 @@ export class GameService implements OnModuleInit {
           multiplier: parseFloat(room.currentMultiplier.toFixed(2)),
           elapsedSeconds: parseFloat(elapsedSeconds.toFixed(2)),
           startTime: room.startTime,
+          targetCrashPoint: roomType === GameRoomType.MARKETING ? room.crashPoint : null,
           serverTime: Date.now(),
         });
         if (roomType === GameRoomType.MARKETING) {
@@ -822,6 +823,7 @@ export class GameService implements OnModuleInit {
       currentMultiplier: parseFloat(room.currentMultiplier.toFixed(2)),
       startTime: room.startTime,
       crashPoint: room.status === GameStatus.CRASHED ? room.crashPoint : null,
+      targetCrashPoint: roomType === GameRoomType.MARKETING ? room.crashPoint : null,
       serverTime: Date.now(),
       bets: includeFullBets ? room.currentRoundBets : null,
       provablyFair: {
