@@ -126,6 +126,7 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
         this.logger.log(`Socket [${client.id}] authorized and subscribed to [admin_room]`);
         const response = { success: true };
         client.emit('adminSubscribed', response);
+        client.emit('marketingPreviewUpdate', this.gameService.getMarketingPreview());
         return response;
       } else {
         this.logger.warn(`Socket [${client.id}] rejected unauthorized subscribeAdmin attempt`);
@@ -136,6 +137,32 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
     } catch (err) {
       this.logger.error('Error during subscribeAdmin', err);
       return { success: false, error: 'Admin subscription error' };
+    }
+  }
+
+  @SubscribeMessage('subscribeStreamerRadar')
+  async handleSubscribeStreamerRadar(client: Socket, data: { token?: string; key?: string }) {
+    const validKey = 'skyrush_streamer_2026';
+    let authorized = false;
+    if (data?.key && data.key.trim() === validKey) {
+      authorized = true;
+    } else if (data?.token && typeof data.token === 'string') {
+      const cleanToken = data.token.trim();
+      const isAdmin = await this.redisService.get(`admin_token:${cleanToken}`);
+      if (isAdmin) authorized = true;
+    }
+
+    if (authorized) {
+      client.join('admin_room');
+      this.logger.log(`Socket [${client.id}] authorized for [streamer_radar]`);
+      const payload = this.gameService.getMarketingPreview();
+      client.emit('streamerRadarSubscribed', { success: true });
+      client.emit('marketingPreviewUpdate', payload);
+      return { success: true, data: payload };
+    } else {
+      const response = { success: false, error: 'Unauthorized radar access' };
+      client.emit('streamerRadarSubscribed', response);
+      return response;
     }
   }
 }

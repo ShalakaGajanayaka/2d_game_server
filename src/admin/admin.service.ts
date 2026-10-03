@@ -1531,6 +1531,10 @@ export class AdminService implements OnModuleInit {
     };
   }
 
+  getMarketingRadarPreview() {
+    return this.gameService.getMarketingPreview();
+  }
+
   async adjustUserBalance(
     userId: string,
     action: 'RESET_ZERO' | 'SET_AMOUNT' | 'DEDUCT',

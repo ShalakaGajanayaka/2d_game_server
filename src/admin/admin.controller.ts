@@ -462,6 +462,39 @@ export class AdminController {
     );
   }
 
+  @Get('api/marketing/preview')
+  async getMarketingPreview(
+    @Req() req: any,
+    @Query('key') streamerKey?: string,
+    @Query('token') queryToken?: string,
+  ) {
+    const validStreamerKey = 'skyrush_streamer_2026';
+    let authorized = false;
+
+    if (streamerKey && streamerKey.trim() === validStreamerKey) {
+      authorized = true;
+    } else {
+      const authHeader = req.headers?.authorization;
+      let token = queryToken?.trim();
+      if (!token && authHeader && authHeader.startsWith('Bearer ')) {
+        token = authHeader.replace('Bearer ', '').trim();
+      }
+      if (token) {
+        const isAdmin = await this.redisService.get(`admin_token:${token}`);
+        if (isAdmin) authorized = true;
+      }
+    }
+
+    if (!authorized) {
+      throw new UnauthorizedException('Invalid or missing admin credentials / streamer key');
+    }
+
+    return {
+      success: true,
+      data: this.adminService.getMarketingRadarPreview(),
+    };
+  }
+
   @UseGuards(AdminAuthGuard)
   @Post('api/users/:id/adjust-balance')
   async adjustUserBalance(

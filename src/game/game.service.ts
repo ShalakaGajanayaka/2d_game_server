@@ -505,6 +505,9 @@ export class GameService implements OnModuleInit {
 
     this.logger.log(`[Room: ${roomType.toUpperCase()}] Starting countdown. Initial bots: ${room.currentRoundBets.length}, Total targeted: ${allBots.length}`);
     this.broadcastState(roomType, true);
+    if (roomType === GameRoomType.MARKETING) {
+      this.broadcastMarketingPreview();
+    }
 
     // Authoritative activation of queued bets for this room
     for (const cb of this.roundStartCallbacks) {
@@ -541,6 +544,9 @@ export class GameService implements OnModuleInit {
     room.timer = setInterval(() => {
       room.countdown--;
       this.broadcastState(roomType, false);
+      if (roomType === GameRoomType.MARKETING) {
+        this.broadcastMarketingPreview();
+      }
 
       if (room.countdown <= 1) {
         if (room.pendingRoundBots.length > 0) {
@@ -584,6 +590,9 @@ export class GameService implements OnModuleInit {
 
     this.logger.log(`[Room: ${roomType.toUpperCase()}] Flight started. Total bets: ${room.currentRoundBets.length}, Crash point: ${room.crashPoint}`);
     this.broadcastState(roomType, false);
+    if (roomType === GameRoomType.MARKETING) {
+      this.broadcastMarketingPreview();
+    }
 
     if (room.gameLoopTimer) clearInterval(room.gameLoopTimer);
 
@@ -600,6 +609,9 @@ export class GameService implements OnModuleInit {
           startTime: room.startTime,
           serverTime: Date.now(),
         });
+        if (roomType === GameRoomType.MARKETING) {
+          this.broadcastMarketingPreview();
+        }
       }
 
       // Check for bot cashouts
@@ -671,6 +683,9 @@ export class GameService implements OnModuleInit {
       `[Room: ${roomType.toUpperCase()}] Round #${room.roundNumber} crashed at ${room.crashPoint}x. ServerSeed revealed: ${room.currentServerSeed.slice(0, 16)}...`,
     );
     this.broadcastState(roomType, false);
+    if (roomType === GameRoomType.MARKETING) {
+      this.broadcastMarketingPreview();
+    }
 
     // Trigger crash callbacks for authoritative round settlement
     for (const cb of this.crashCallbacks) {
@@ -847,6 +862,47 @@ export class GameService implements OnModuleInit {
       };
       if (userId) this.server.to(`user:${userId}`).emit('betActivated', payload);
       if (username) this.server.to(`user:${username.toLowerCase()}`).emit('betActivated', payload);
+    }
+  }
+
+  public getMarketingPreview() {
+    const room = this.rooms.get(GameRoomType.MARKETING)!;
+    const estFlightDuration =
+      room.crashPoint > 1.0
+        ? Math.max(0.5, parseFloat((Math.log(room.crashPoint) / 0.095).toFixed(1)))
+        : 0;
+    const elapsedSeconds =
+      room.status === GameStatus.PLAYING
+        ? Math.max(0, parseFloat(((Date.now() - room.startTime) / 1000).toFixed(1)))
+        : 0;
+    const remainingSeconds =
+      room.status === GameStatus.PLAYING
+        ? Math.max(0, parseFloat((estFlightDuration - elapsedSeconds).toFixed(1)))
+        : estFlightDuration;
+    const safeCashoutTarget = Math.max(1.15, parseFloat((room.crashPoint * 0.85).toFixed(2)));
+
+    return {
+      room: GameRoomType.MARKETING,
+      roundNumber: room.roundNumber,
+      status: room.status,
+      countdown: room.countdown,
+      targetStartTime: room.targetStartTime,
+      startTime: room.startTime,
+      currentMultiplier: parseFloat(room.currentMultiplier.toFixed(2)),
+      crashPoint: room.crashPoint,
+      safeCashoutTarget,
+      estFlightDuration,
+      elapsedSeconds,
+      remainingSeconds,
+      activeAutoWinBetsCount: room.activeMarketingAutoWinBets.length,
+      activeBetsCount: room.currentRoundBets.length,
+      serverTime: Date.now(),
+    };
+  }
+
+  public broadcastMarketingPreview() {
+    if (this.server) {
+      this.server.to('admin_room').emit('marketingPreviewUpdate', this.getMarketingPreview());
     }
   }
 }
