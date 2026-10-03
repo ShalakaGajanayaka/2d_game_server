@@ -213,10 +213,7 @@ export class AdminService implements OnModuleInit {
     const realApprovedList = approvedList.filter((d) => !marketingUserIds.has(d.userId));
     const approvedDeposits = realApprovedList.length;
     const totalDepositedAmount = parseFloat(
-      realApprovedList.reduce((sum, d) => {
-        const rate = PLATFORM_EXCHANGE_RATES[(d.currency || 'USD').toUpperCase()] || 1.0;
-        return sum + (Number(d.amount) / rate);
-      }, 0).toFixed(2),
+      realApprovedList.reduce((sum, d) => sum + Number(d.amount), 0).toFixed(2),
     );
 
     const pendingWithdrawals = await this.withdrawalRepo.count({ where: { status: WithdrawalStatus.PENDING } });
@@ -224,10 +221,7 @@ export class AdminService implements OnModuleInit {
     const realPaidWithdrawals = paidWithdrawalList.filter((w) => !marketingUserIds.has(w.userId) && !w.isMarketing);
     const paidWithdrawals = realPaidWithdrawals.length;
     const totalWithdrawnAmount = parseFloat(
-      realPaidWithdrawals.reduce((sum, w) => {
-        const rate = PLATFORM_EXCHANGE_RATES[(w.currency || 'USD').toUpperCase()] || 1.0;
-        return sum + (Number(w.amount) / rate);
-      }, 0).toFixed(2),
+      realPaidWithdrawals.reduce((sum, w) => sum + Number(w.amount), 0).toFixed(2),
     );
 
     // Only real customer wallets count toward real active system liability (already in USD)

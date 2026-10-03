@@ -87,13 +87,7 @@ export const TIMEZONE_TO_COUNTRY: Record<string, string> = {
 };
 
 export const PLATFORM_EXCHANGE_RATES: Record<string, number> = {
-  USD: 1.0,      // Reference base
-  USDT: 1.0,     // 1:1 pegged with USD
-  LKR: 300.0,    // 1 USD = 300 LKR
-  INR: 85.0,     // 1 USD = 85 INR
-  EUR: 0.92,     // 1 USD = 0.92 EUR
-  GBP: 0.79,     // 1 USD = 0.79 GBP
-  AED: 3.67,     // 1 USD = 3.67 AED
+  USD: 1.0,
 };
 
 export interface UserProfile {
@@ -267,23 +261,20 @@ export class AuthService implements OnModuleInit {
   }
 
   private sanitizeUser(user: User): UserProfile {
-    const userCur = (user.currency || 'USD').toUpperCase();
-    const rate = PLATFORM_EXCHANGE_RATES[userCur] || 1.0;
     const baseBal = Number(user.balance || 0);
-    // Exact cent rounding without floating-point precision loss
-    const displayBal = Math.round((baseBal * rate) * 100) / 100;
+    const displayBal = Math.round(baseBal * 100) / 100;
 
     return {
       id: user.id,
       username: user.username,
       email: user.email || undefined,
       phoneNumber: user.phoneNumber || undefined,
-      currency: userCur,
-      balance: displayBal, // Seamlessly formats in user's selected currency
-      baseBalance: parseFloat(baseBal.toFixed(6)), // Universal USD base in database
-      exchangeRate: rate,
+      currency: 'USD',
+      balance: displayBal,
+      baseBalance: displayBal,
+      exchangeRate: 1.0,
       gamesPlayed: Number(user.gamesPlayed),
-      totalWon: Math.round((Number(user.totalWon || 0) * rate) * 100) / 100,
+      totalWon: Math.round(Number(user.totalWon || 0) * 100) / 100,
       bestMultiplier: Number(user.bestMultiplier),
       createdAt: user.createdAt ? new Date(user.createdAt).getTime() : Date.now(),
       savedWithdrawalDetails: user.savedWithdrawalDetails,
@@ -580,32 +571,16 @@ export class AuthService implements OnModuleInit {
     const roomType = isMarketingUser ? GameRoomType.MARKETING : GameRoomType.STANDARD;
     const isWaiting = this.gameService.getStatus(roomType) === GameStatus.WAITING;
 
-    const userCurrency = (user.currency || 'USD').toUpperCase();
-    const rate = PLATFORM_EXCHANGE_RATES[userCurrency] || 1.0;
-
-    let minBet = 50.0;
-    let maxBet = 20000.0;
-    if (['USD', 'USDT', 'EUR', 'GBP'].includes(userCurrency)) {
-      minBet = 1.0;
-      maxBet = 500.0;
-    } else if (userCurrency === 'AED') {
-      minBet = 5.0;
-      maxBet = 8000.0;
-    } else if (userCurrency === 'INR') {
-      minBet = 20.0;
-      maxBet = 150000.0;
-    }
+    // Pure USD Bet Range: $1.00 min to $500.00 max
+    const minBet = 1.0;
+    const maxBet = 500.0;
 
     const cleanAmount = parseFloat(Number(amount).toFixed(2));
     if (isNaN(cleanAmount) || cleanAmount < minBet || cleanAmount > maxBet) {
-      throw new BadRequestException(`Bet amount must be between ${minBet} and ${maxBet} ${userCurrency}`);
+      throw new BadRequestException(`Bet amount must be between $${minBet.toFixed(2)} and $${maxBet.toFixed(2)} USD`);
     }
 
-    // Convert display bet amount to Universal Base USD with 6 decimal precision
-    const betAmountUSD = parseFloat((cleanAmount / rate).toFixed(6));
-    if (betAmountUSD <= 0) {
-      throw new BadRequestException('Bet amount is too low');
-    }
+    const betAmountUSD = cleanAmount;
 
     // Phase 2: Distributed Atomic Mutex Lock
     const lockKey = `lock:bet:${user.id}:${betIndex}`;
@@ -642,17 +617,17 @@ export class AuthService implements OnModuleInit {
         }
 
         const currentBalanceUSD = Number(lockedUser.balance);
-        const epsilon = 0.00001;
+        const epsilon = 0.001;
         if (currentBalanceUSD + epsilon < betAmountUSD) {
-          const availableDisplay = Math.round((currentBalanceUSD * rate) * 100) / 100;
-          throw new BadRequestException(`Insufficient wallet balance. Available: ${userCurrency} ${availableDisplay}`);
+          throw new BadRequestException(`Insufficient wallet balance. Available: $${currentBalanceUSD.toFixed(2)} USD`);
         }
 
-        let newBalanceUSD = parseFloat((currentBalanceUSD - betAmountUSD).toFixed(6));
-        if (Math.abs(newBalanceUSD) < epsilon || newBalanceUSD < 0) {
+        let newBalanceUSD = parseFloat((currentBalanceUSD - betAmountUSD).toFixed(2));
+        if (newBalanceUSD < 0) {
           newBalanceUSD = 0.0;
         }
         lockedUser.balance = newBalanceUSD;
+        lockedUser.currency = 'USD';
         savedUser = await manager.save(lockedUser);
 
         await manager.save(Transaction, {
@@ -671,10 +646,10 @@ export class AuthService implements OnModuleInit {
         userId: savedUser!.id,
         username: savedUser!.username,
         betIndex,
-        amount: cleanAmount, // client display currency
-        amountUSD: betAmountUSD, // universal base USD (6 decimal precision)
-        currency: userCurrency,
-        rate,
+        amount: cleanAmount,
+        amountUSD: cleanAmount,
+        currency: 'USD',
+        rate: 1.0,
         roomType,
         roundStartTime: isWaiting ? this.gameService.getStartTime(roomType) : null,
         queued: !isWaiting,
@@ -709,7 +684,7 @@ export class AuthService implements OnModuleInit {
       } else {
         // Save queued bet in Redis (300s TTL) for auto-activation on next round start
         await this.redisService.set(queuedBetKey, JSON.stringify(betRecord), 300);
-        this.logger.log(`[Next-Round Queue][${roomType}] Staged bet for user ${savedUser!.username} (Slot ${betIndex}, ${cleanAmount} ${userCurrency})`);
+        this.logger.log(`[Next-Round Queue][${roomType}] Staged bet for user ${savedUser!.username} (Slot ${betIndex}, $${cleanAmount.toFixed(2)} USD)`);
       }
 
       const sanitized = this.sanitizeUser(savedUser!);
@@ -769,11 +744,7 @@ export class AuthService implements OnModuleInit {
       await this.redisService.del(isQueued ? queuedBetKey : activeBetKey);
 
       const betRecord = JSON.parse(raw!);
-      const betCurrency = betRecord.currency || user.currency || 'USD';
-      const rate = betRecord.rate || PLATFORM_EXCHANGE_RATES[betCurrency] || 1.0;
-      const refundAmountUSD = betRecord.amountUSD
-        ? Number(betRecord.amountUSD)
-        : parseFloat((Number(betRecord.amount) / rate).toFixed(6));
+      const refundAmountUSD = Number(betRecord.amountUSD || betRecord.amount || 0);
 
       // Phase 2: PostgreSQL ACID Transaction with Pessimistic Row Locking
       let savedUser: User;
@@ -854,10 +825,7 @@ export class AuthService implements OnModuleInit {
       await this.redisService.del(betKey);
 
       const betRecord = JSON.parse(raw);
-      const betAmountDisplay = Number(betRecord.amount);
-      const betCurrency = betRecord.currency || user.currency || 'USD';
-      const rate = betRecord.rate || PLATFORM_EXCHANGE_RATES[betCurrency] || 1.0;
-      const betAmountUSD = betRecord.amountUSD ? Number(betRecord.amountUSD) : parseFloat((betAmountDisplay / rate).toFixed(6));
+      const betAmountUSD = Number(betRecord.amountUSD || betRecord.amount || 0);
 
       // Authoritative multiplier check
       const currentMultiplier = parseFloat(this.gameService.getCurrentMultiplier(roomType).toFixed(2));
@@ -881,15 +849,12 @@ export class AuthService implements OnModuleInit {
         throw new BadRequestException('Plane has already crashed!');
       }
 
-      // Exact 6-decimal USD winning calculation with Max Payout Cap ($10,000 USD Spribe Standard)
+      // Pure USD winning calculation with Max Payout Cap ($10,000 USD)
       const MAX_PAYOUT_USD = 10000.0;
-      const rawWinUSD = parseFloat((betAmountUSD * currentMultiplier).toFixed(6));
+      const rawWinUSD = parseFloat((betAmountUSD * currentMultiplier).toFixed(2));
       const winAmountUSD = Math.min(rawWinUSD, MAX_PAYOUT_USD);
-      const profitUSD = parseFloat((winAmountUSD - betAmountUSD).toFixed(6));
-
-      // Display win amount with exact cent rounding
-      const effectiveMult = betAmountUSD > 0 ? (winAmountUSD / betAmountUSD) : currentMultiplier;
-      const displayWinAmount = Math.round((betAmountDisplay * effectiveMult) * 100) / 100;
+      const profitUSD = parseFloat((winAmountUSD - betAmountUSD).toFixed(2));
+      const displayWinAmount = winAmountUSD;
 
       // Phase 2: PostgreSQL ACID Transaction with Pessimistic Row Locking
       let savedUser: User;
@@ -1063,9 +1028,7 @@ export class AuthService implements OnModuleInit {
           }
 
           await this.redisService.del(key);
-          const betCurrency = betRecord.currency || 'USD';
-          const rate = betRecord.rate || PLATFORM_EXCHANGE_RATES[betCurrency] || 1.0;
-          const betAmountUSD = betRecord.amountUSD ? Number(betRecord.amountUSD) : parseFloat((Number(betRecord.amount) / rate).toFixed(6));
+          const betAmountUSD = Number(betRecord.amountUSD || betRecord.amount || 0);
           await this.betHistoryRepository.save({
             userId: betRecord.userId,
             betAmount: betAmountUSD,

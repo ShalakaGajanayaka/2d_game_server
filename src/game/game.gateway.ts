@@ -26,9 +26,32 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
     this.gameService.setServer(server);
   }
 
-  handleConnection(client: Socket) {
-    // Send public game state to newly connected client (defaults to room:standard)
-    client.join('room:standard');
+  async handleConnection(client: Socket) {
+    const token = (client.handshake?.auth?.token || client.handshake?.query?.token) as string | undefined;
+    if (token && typeof token === 'string' && token.trim().length > 0) {
+      try {
+        const cleanToken = token.trim();
+        const username = await this.redisService.get(`token:${cleanToken}`);
+        if (username) {
+          const dbUser = await this.userRepo.findOne({
+            where: [{ username: ILike(username) }, { email: ILike(username) }],
+          });
+          if (dbUser && dbUser.isMarketing) {
+            await client.join('room:marketing');
+            await client.join(`user:${username.toLowerCase()}`);
+            await client.join(`user:${dbUser.id}`);
+            client.emit('gameState', this.gameService.getGameState(GameRoomType.MARKETING, true));
+            this.logger.log(`🎯 Marketing Streamer [${username}] auto-joined [room:marketing] on connection handshake`);
+            return;
+          }
+        }
+      } catch (err) {
+        this.logger.warn(`Error during connection handshake auth check: ${err?.message}`);
+      }
+    }
+
+    // Default to room:standard
+    await client.join('room:standard');
     client.emit('gameState', this.gameService.getGameState(GameRoomType.STANDARD, true));
   }
 

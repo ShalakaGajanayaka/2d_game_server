@@ -633,6 +633,7 @@ export class GameService implements OnModuleInit {
       // Every 250ms (5 ticks), emit lightweight heartbeat
       if (room.flightTickCount % 5 === 0 && this.server) {
         this.server.to(`room:${roomType}`).emit('flightSync', {
+          room: roomType,
           multiplier: parseFloat(room.currentMultiplier.toFixed(2)),
           elapsedSeconds: parseFloat(elapsedSeconds.toFixed(2)),
           startTime: room.startTime,
