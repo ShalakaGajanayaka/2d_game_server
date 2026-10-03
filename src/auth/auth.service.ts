@@ -714,7 +714,7 @@ export class AuthService implements OnModuleInit {
 
       const sanitized = this.sanitizeUser(savedUser!);
       try {
-        await this.redisService.set(`user:${savedUser!.username}`, JSON.stringify(sanitized));
+        await this.redisService.set(`user:${savedUser!.username.toLowerCase()}`, JSON.stringify(sanitized));
       } catch {}
 
       return {
@@ -808,7 +808,7 @@ export class AuthService implements OnModuleInit {
 
       const sanitized = this.sanitizeUser(savedUser!);
       try {
-        await this.redisService.set(`user:${savedUser!.username}`, JSON.stringify(sanitized));
+        await this.redisService.set(`user:${savedUser!.username.toLowerCase()}`, JSON.stringify(sanitized));
       } catch {}
 
       return {
@@ -939,7 +939,7 @@ export class AuthService implements OnModuleInit {
 
       const sanitized = this.sanitizeUser(savedUser!);
       try {
-        await this.redisService.set(`user:${savedUser!.username}`, JSON.stringify(sanitized));
+        await this.redisService.set(`user:${savedUser!.username.toLowerCase()}`, JSON.stringify(sanitized));
       } catch {}
 
       return {

@@ -3,6 +3,9 @@ import { Server, Socket } from 'socket.io';
 import { GameService, GameRoomType } from './game.service';
 import { RedisService } from '../redis/redis.service';
 import { forwardRef, Inject, Logger } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, ILike } from 'typeorm';
+import { User } from '../auth/entities/user.entity';
 
 @WebSocketGateway({ cors: true })
 export class GameGateway implements OnGatewayInit, OnGatewayConnection {
@@ -15,6 +18,8 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
     @Inject(forwardRef(() => GameService))
     private readonly gameService: GameService,
     private readonly redisService: RedisService,
+    @InjectRepository(User)
+    private readonly userRepo: Repository<User>,
   ) {}
 
   afterInit(server: Server) {
@@ -59,27 +64,55 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
         const userRoom = `user:${username.toLowerCase()}`;
         client.join(userRoom);
 
-        // Also join user ID room for reliable UUID targeted notifications
+        // Authoritative Database Verification for Marketing Role
         let isMarketing = false;
-        const userJson = await this.redisService.get(`user:${username.toLowerCase()}`);
-        if (userJson) {
-          const userObj = JSON.parse(userJson);
-          if (userObj?.id) {
-            client.join(`user:${userObj.id}`);
+        let dbUser: User | null = null;
+        try {
+          dbUser = await this.userRepo.findOne({
+            where: [{ username: ILike(username) }, { email: ILike(username) }],
+          });
+          if (dbUser) {
+            isMarketing = !!dbUser.isMarketing;
+            client.join(`user:${dbUser.id}`);
           }
-          if (userObj?.isMarketing) {
-            isMarketing = true;
-          }
+        } catch (dbErr) {
+          this.logger.warn(`Database user lookup fallback for ${username}: ${dbErr?.message}`);
         }
 
-        // Dynamic Room Routing: If user is marketing, assign to room:marketing; otherwise room:standard
+        // Fallback to Redis cache if DB lookup didn't resolve user
+        if (!dbUser) {
+          const userJson = await this.redisService.get(`user:${username.toLowerCase()}`);
+          if (userJson) {
+            const userObj = JSON.parse(userJson);
+            if (userObj?.id) {
+              client.join(`user:${userObj.id}`);
+            }
+            if (userObj?.isMarketing) {
+              isMarketing = true;
+            }
+          }
+        } else {
+          // Synchronize Redis with authoritative DB flags
+          try {
+            const userJson = await this.redisService.get(`user:${username.toLowerCase()}`);
+            const userObj = userJson ? JSON.parse(userJson) : {};
+            userObj.isMarketing = isMarketing;
+            userObj.isMarketingAutoWin = !!dbUser.isMarketingAutoWin;
+            userObj.id = dbUser.id;
+            await this.redisService.set(`user:${username.toLowerCase()}`, JSON.stringify(userObj), 86400 * 7);
+          } catch {}
+        }
+
+        // Dynamic Room Routing: Marketing accounts route to room:marketing; real clients strictly to room:standard
         if (isMarketing) {
           client.leave('room:standard');
           client.join('room:marketing');
-          this.logger.log(`🎯 Marketing Streamer [${username}] routed to [room:marketing]`);
+          this.logger.log(`🎯 Marketing Streamer [${username}] authoritatively routed to [room:marketing]`);
           client.emit('gameState', this.gameService.getGameState(GameRoomType.MARKETING, true));
         } else {
+          client.leave('room:marketing');
           client.join('room:standard');
+          this.logger.log(`👤 Real Client [${username}] authoritatively routed to [room:standard]`);
           client.emit('gameState', this.gameService.getGameState(GameRoomType.STANDARD, true));
         }
 
