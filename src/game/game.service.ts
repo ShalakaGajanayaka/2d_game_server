@@ -48,9 +48,17 @@ const NAME_SUFFIXES = [
   '_win', '_fast', '_top', '24', '10', '98', '03', '50', '21', '_usdt', '_sky',
 ];
 
-const BET_AMOUNTS = [
-  1, 2, 5, 10, 15, 20, 25, 30, 40, 50, 75, 100, 150, 200, 250, 500, 1000, 1500, 2000,
-];
+// Industry-standard realistic bet distribution pools (USD Universal Base)
+// Standard Room: Natural retail player distribution (~75% micro, ~19% mid, ~6% high, max $500)
+const STANDARD_BETS_SMALL = [1, 2, 3, 5, 7, 10, 12, 15, 20, 25];
+const STANDARD_BETS_MEDIUM = [30, 40, 50, 60, 75, 80, 100];
+const STANDARD_BETS_HIGH = [120, 150, 180, 200, 250, 300, 500];
+
+// Marketing Room: Streamer-oriented lively bets without suspicious $1000+ walls (~60% small, ~28% mid, ~12% high, max $500)
+const MARKETING_BETS_SMALL = [2, 5, 8, 10, 15, 20, 25, 30];
+const MARKETING_BETS_MEDIUM = [35, 50, 60, 75, 100, 125, 150];
+const MARKETING_BETS_HIGH = [175, 200, 250, 300, 350, 400, 500];
+
 
 export class GameRoomState {
   readonly roomType: GameRoomType;
@@ -379,6 +387,27 @@ export class GameService implements OnModuleInit {
     return `${prefix}${suffix}`;
   }
 
+  private getRandomBotBetAmount(roomType: GameRoomType): number {
+    const roll = Math.random();
+    if (roomType === GameRoomType.MARKETING) {
+      if (roll < 0.60) {
+        return MARKETING_BETS_SMALL[Math.floor(Math.random() * MARKETING_BETS_SMALL.length)];
+      } else if (roll < 0.88) {
+        return MARKETING_BETS_MEDIUM[Math.floor(Math.random() * MARKETING_BETS_MEDIUM.length)];
+      } else {
+        return MARKETING_BETS_HIGH[Math.floor(Math.random() * MARKETING_BETS_HIGH.length)];
+      }
+    } else {
+      if (roll < 0.75) {
+        return STANDARD_BETS_SMALL[Math.floor(Math.random() * STANDARD_BETS_SMALL.length)];
+      } else if (roll < 0.94) {
+        return STANDARD_BETS_MEDIUM[Math.floor(Math.random() * STANDARD_BETS_MEDIUM.length)];
+      } else {
+        return STANDARD_BETS_HIGH[Math.floor(Math.random() * STANDARD_BETS_HIGH.length)];
+      }
+    }
+  }
+
   private generateRoundBots(roomType: GameRoomType): LiveBet[] {
     // Generate between 120 and 260 bots per round (100 - 300 range)
     const count = Math.floor(Math.random() * 141) + 120;
@@ -394,7 +423,7 @@ export class GameService implements OnModuleInit {
       }
       usedNames.add(name);
 
-      const betAmount = BET_AMOUNTS[Math.floor(Math.random() * BET_AMOUNTS.length)];
+      const betAmount = this.getRandomBotBetAmount(roomType);
 
       let targetMultiplier: number;
       const roll = Math.random();
