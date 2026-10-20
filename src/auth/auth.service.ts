@@ -196,30 +196,81 @@ export class AuthService implements OnModuleInit {
     }
   }
 
-  private async generateUniqueUsername(): Promise<string> {
-    const prefixes = [
-      'Pilot',
-      'SkyAce',
-      'Aero',
-      'JetRider',
-      'SkyWalker',
-      'SkyCaptain',
-      'CloudStriker',
-      'TopGun',
-      'FlightMaster',
-      'SpeedAce',
+  private async generateUniqueUsername(preferred?: string, identifier?: string): Promise<string> {
+    const ADJECTIVES = [
+      'Apex', 'Cyber', 'Neon', 'Shadow', 'Lucky', 'Hyper', 'Vortex', 'Cosmic',
+      'Thunder', 'Silver', 'Golden', 'Phantom', 'Blaze', 'Iron', 'Turbo', 'Frost',
+      'Alpha', 'Dark', 'Mystic', 'Rapid', 'Silent', 'Aero', 'Solar', 'Sonic',
+      'Viper', 'Nova', 'Swift', 'Atomic', 'Crimson', 'Titan', 'Ghost', 'Stellar',
+      'Quantum', 'Electric', 'Brave', 'Wild', 'Mighty', 'Epic', 'Fierce', 'Omega',
+      'Storm', 'Blazing', 'Velocity', 'Savage', 'Prime', 'Rogue', 'Venom', 'Astral',
+      'Flash', 'Zenith', 'Striker', 'Glitch', 'Dynamo', 'Cobalt'
     ];
+
+    const NOUNS = [
+      'Falcon', 'Pilot', 'Rider', 'Ace', 'Hawk', 'Wolf', 'Captain', 'Viper',
+      'Rocket', 'Hunter', 'Striker', 'Eagle', 'Ghost', 'Blazer', 'Titan', 'Jet',
+      'Storm', 'Flyer', 'Phoenix', 'Dragon', 'Raven', 'Knight', 'Avenger', 'Corsair',
+      'Baron', 'Fox', 'Lynx', 'Cobra', 'Panther', 'Jaguar', 'Hornet', 'Specter',
+      'Navigator', 'Ranger', 'Spitfire', 'Mirage', 'Glider', 'Comet', 'Meteor', 'Bomber',
+      'SkyWalker', 'Overlord', 'Drifter', 'Turbine', 'Prophet', 'Nomad',
+      'Sentinel', 'Tempest', 'Thunderbolt', 'Maverick', 'Striker'
+    ];
+
+    const RESERVED_WORDS = ['admin', 'skyrush', 'support', 'moderator', 'system', 'official', 'staff', 'bot'];
+
+    // 1. If user supplied a valid custom requested username
+    if (preferred && typeof preferred === 'string') {
+      const cleanPref = preferred.trim().replace(/[^a-zA-Z0-9_]/g, '');
+      const isReserved = RESERVED_WORDS.some(w => cleanPref.toLowerCase().includes(w));
+      if (cleanPref.length >= 3 && cleanPref.length <= 16 && !isReserved) {
+        const exists = await this.userRepository.findOne({
+          where: [
+            { username: cleanPref },
+            { username: cleanPref.toLowerCase() },
+          ],
+        });
+        if (!exists) {
+          return cleanPref;
+        }
+
+        // If taken, append clean short lucky gaming tags (e.g. 7, 77, 88, 99)
+        const candidates = [77, 88, 99, 7, Math.floor(10 + Math.random() * 89)];
+        for (const num of candidates) {
+          const suffixed = `${cleanPref}_${num}`.slice(0, 16);
+          const suffixedExists = await this.userRepository.findOne({
+            where: [{ username: suffixed }, { username: suffixed.toLowerCase() }],
+          });
+          if (!suffixedExists) return suffixed;
+        }
+      }
+    }
+
+    // 2. High-Entropy Procedural Compound Generation (Adjective + Noun + Natural Tag)
     let isUnique = false;
     let candidate = '';
     let attempts = 0;
 
-    while (!isUnique && attempts < 25) {
+    while (!isUnique && attempts < 35) {
       attempts++;
-      const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
-      const randomNum = Math.floor(10000 + Math.random() * 90000); // 5 digits (e.g. 78421)
-      candidate = `${prefix}_${randomNum}`;
+      const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
+      const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
 
-      // Check if username exists in database (exact and lowercase)
+      // Natural Gamertag Styles:
+      // 35% chance: Clean Compound (e.g. "CyberFalcon", "ApexRider")
+      // 40% chance: 2-Digit Tag (e.g. "NeonViper77", "LuckyWolf88")
+      // 25% chance: Underscore Tag (e.g. "ShadowAce_99", "BlazeHawk_07")
+      const style = Math.random();
+      if (style < 0.35) {
+        candidate = `${adj}${noun}`;
+      } else if (style < 0.75) {
+        const num = Math.floor(10 + Math.random() * 90);
+        candidate = `${adj}${noun}${num}`;
+      } else {
+        const num = Math.floor(1 + Math.random() * 99);
+        candidate = `${adj}${noun}_${num < 10 ? '0' + num : num}`;
+      }
+
       const exists = await this.userRepository.findOne({
         where: [
           { username: candidate },
@@ -233,8 +284,7 @@ export class AuthService implements OnModuleInit {
     }
 
     if (!isUnique) {
-      // High-concurrency fallback ensuring complete uniqueness
-      candidate = `Pilot_${Date.now().toString().slice(-6)}`;
+      candidate = `Ace_${Date.now().toString().slice(-5)}`;
     }
 
     return candidate;
@@ -292,6 +342,7 @@ export class AuthService implements OnModuleInit {
     password: string,
     currency?: string,
     clientIp?: string,
+    requestedUsername?: string,
   ): Promise<{ token: string; user: UserProfile }> {
     const clean = identifier?.trim().replace(/\s+/g, '');
     if (!clean || clean.length < 3) {
@@ -299,7 +350,11 @@ export class AuthService implements OnModuleInit {
     }
 
     // IP Registration Quota Protection (Max 5 account registrations per IP per hour)
-    if (clientIp) {
+    // In local development / testing, bypass loopback IP throttle to allow seamless testing
+    const isLoopbackIp = !clientIp || clientIp === '127.0.0.1' || clientIp === '::1' || clientIp.includes('127.0.0.1');
+    const isProd = process.env.NODE_ENV === 'production';
+
+    if (clientIp && (isProd || !isLoopbackIp)) {
       const ipKey = `reg_rate_ip:${clientIp}`;
       const regCountRaw = await this.redisService.get(ipKey);
       const regCount = regCountRaw ? parseInt(regCountRaw, 10) : 0;
@@ -352,8 +407,8 @@ export class AuthService implements OnModuleInit {
     const cleanCurrency = 'USD';
     const initialWelcomeBalance = 0.0;
 
-    // Auto-generate guaranteed unique username (not existing in database)
-    const uniqueUsername = await this.generateUniqueUsername();
+    // Auto-generate or validate guaranteed unique gaming call-sign / username
+    const uniqueUsername = await this.generateUniqueUsername(requestedUsername, clean);
 
     const newUser = this.userRepository.create({
       username: uniqueUsername,

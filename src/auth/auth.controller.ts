@@ -30,8 +30,9 @@ export class AuthController {
   @Post('register')
   async register(@Req() req: any, @Body() body: RegisterDto) {
     const clientIp = (req?.headers?.['cf-connecting-ip'] || req?.headers?.['x-forwarded-for'] || req?.ip || '').toString().split(',')[0].trim();
-    const identifier = body.email || body.phoneNumber || body.mobile || body.username || '';
-    return this.authService.register(identifier, body.password, body.currency, clientIp);
+    const identifier = body.email || body.phoneNumber || body.mobile || '';
+    const requestedUsername = body.username?.trim();
+    return this.authService.register(identifier, body.password, body.currency, clientIp, requestedUsername);
   }
 
   @Post('login')
