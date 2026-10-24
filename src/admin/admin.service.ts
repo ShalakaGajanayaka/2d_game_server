@@ -109,8 +109,16 @@ export class AdminService implements OnModuleInit {
     }
 
     const cleanAmount = Number(amount);
-    if (!cleanAmount || cleanAmount <= 0) {
-      throw new BadRequestException('Deposit amount must be greater than zero');
+    const targetCurrency = (currency || 'USD').toUpperCase();
+    const rate = PLATFORM_EXCHANGE_RATES[targetCurrency] || 1.0;
+    const usdtEquivalent = cleanAmount / rate;
+
+    // Minimum 5 USDT / USD validation across all supported currencies
+    if (!cleanAmount || usdtEquivalent < 4.99) {
+      const minLocal = (5.0 * rate).toFixed(2);
+      throw new BadRequestException(
+        `Minimum deposit amount is 5 USDT (approx ${targetCurrency} ${minLocal})`,
+      );
     }
 
     const cleanRef = (referenceNumber || '').trim();
