@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { Server } from 'socket.io';
 import * as crypto from 'crypto';
 import { RedisService } from '../redis/redis.service';
@@ -81,6 +81,7 @@ export class GameRoomState {
   timer: NodeJS.Timeout | null = null;
   gameLoopTimer: NodeJS.Timeout | null = null;
   botStreamTimer: NodeJS.Timeout | null = null;
+  postCrashTimer: NodeJS.Timeout | null = null;
   currentRoundBets: LiveBet[] = [];
   pendingRoundBots: LiveBet[] = [];
 
@@ -107,7 +108,7 @@ export class GameRoomState {
 }
 
 @Injectable()
-export class GameService implements OnModuleInit {
+export class GameService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(GameService.name);
   private server: Server;
 
@@ -175,6 +176,28 @@ export class GameService implements OnModuleInit {
       const room = this.rooms.get(roomType)!;
       if (room.status === GameStatus.WAITING && room.countdown === 10) {
         this.startCountdown(roomType);
+      }
+    }
+  }
+
+  onModuleDestroy() {
+    this.logger.log('🛑 [Graceful Shutdown] Cleaning up all room timers and loops...');
+    for (const [roomType, room] of this.rooms.entries()) {
+      if (room.timer) {
+        clearInterval(room.timer);
+        room.timer = null;
+      }
+      if (room.gameLoopTimer) {
+        clearInterval(room.gameLoopTimer);
+        room.gameLoopTimer = null;
+      }
+      if (room.botStreamTimer) {
+        clearInterval(room.botStreamTimer);
+        room.botStreamTimer = null;
+      }
+      if (room.postCrashTimer) {
+        clearTimeout(room.postCrashTimer);
+        room.postCrashTimer = null;
       }
     }
   }
@@ -790,7 +813,8 @@ export class GameService implements OnModuleInit {
     }
 
     // Wait 3 seconds before next round
-    setTimeout(() => {
+    room.postCrashTimer = setTimeout(() => {
+      room.postCrashTimer = null;
       this.startCountdown(roomType);
     }, 3000);
   }

@@ -68,6 +68,9 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
   const port = configService.get<number>('PORT') || 3000;
   
+  // Enable graceful shutdown hooks for zero-downtime rolling updates & PM2 reload
+  app.enableShutdownHooks();
+
   // Bind to '0.0.0.0' for Render.com support
   await app.listen(port, '0.0.0.0');
   console.log(`Application is running on: ${await app.getUrl()}`);

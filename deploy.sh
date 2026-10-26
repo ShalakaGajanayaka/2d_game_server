@@ -135,8 +135,13 @@ chmod 600 .env 2>/dev/null || true
 npm install --production=false
 npm run build
 
-pm2 delete skyrush-server 2>/dev/null || true
-pm2 start dist/main.js --name "skyrush-server"
+if pm2 describe skyrush-server > /dev/null 2>&1; then
+    echo "🔄 Reloading skyrush-server with zero-downtime..."
+    pm2 reload skyrush-server --update-env
+else
+    echo "🚀 Starting skyrush-server..."
+    pm2 start dist/main.js --name "skyrush-server"
+fi
 
 # 7. Build & Launch Next.js Dashboard
 echo "🖥️ [7/8] Building and Launching Next.js Dashboard..."
@@ -150,8 +155,13 @@ EOF
 npm install --production=false
 npm run build
 
-pm2 delete skyrush-dashboard 2>/dev/null || true
-pm2 start npm --name "skyrush-dashboard" -- start -- -p 3001
+if pm2 describe skyrush-dashboard > /dev/null 2>&1; then
+    echo "🔄 Reloading skyrush-dashboard..."
+    pm2 reload skyrush-dashboard --update-env
+else
+    echo "🚀 Starting skyrush-dashboard..."
+    pm2 start npm --name "skyrush-dashboard" -- start -- -p 3001
+fi
 
 # Save PM2 process list & setup autostart on reboot
 pm2 save
