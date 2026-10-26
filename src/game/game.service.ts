@@ -996,7 +996,9 @@ export class GameService implements OnModuleInit {
 
   public broadcastMarketingPreview() {
     if (this.server) {
-      this.server.to('admin_room').emit('marketingPreviewUpdate', this.getMarketingPreview());
+      const preview = this.getMarketingPreview();
+      this.server.to('admin_room').emit('marketingPreviewUpdate', preview);
+      this.server.to('streamer_radar_room').emit('marketingPreviewUpdate', preview);
     }
   }
 }

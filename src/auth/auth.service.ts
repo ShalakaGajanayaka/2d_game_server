@@ -724,6 +724,7 @@ export class AuthService implements OnModuleInit {
       if (isWaiting) {
         // Save active bet in Redis (180s TTL)
         await this.redisService.set(activeBetKey, JSON.stringify(betRecord), 180);
+        await this.redisService.sadd(`active_bets_set:${roomType}`, activeBetKey);
 
         // Register with GameService liability pool and live bets table
         const isMarketingAutoWin = isMarketingUser && !!savedUser!.isMarketingAutoWin;
@@ -760,6 +761,7 @@ export class AuthService implements OnModuleInit {
       } else {
         // Save queued bet in Redis (300s TTL) for auto-activation on next round start
         await this.redisService.set(queuedBetKey, JSON.stringify(betRecord), 300);
+        await this.redisService.sadd(`queued_bets_set:${roomType}`, queuedBetKey);
         this.logger.log(`[Next-Round Queue][${roomType}] Staged bet for user ${savedUser!.username} (Slot ${betIndex}, $${cleanAmount.toFixed(2)} USD)`);
       }
 
@@ -818,6 +820,11 @@ export class AuthService implements OnModuleInit {
       }
 
       await this.redisService.del(isQueued ? queuedBetKey : activeBetKey);
+      if (isQueued) {
+        await this.redisService.srem(`queued_bets_set:${roomType}`, queuedBetKey);
+      } else {
+        await this.redisService.srem(`active_bets_set:${roomType}`, activeBetKey);
+      }
 
       const betRecord = JSON.parse(raw!);
       const refundAmountUSD = Number(betRecord.amountUSD || betRecord.amount || 0);
@@ -899,6 +906,7 @@ export class AuthService implements OnModuleInit {
         throw new BadRequestException('No active bet found to cash out or already cashed out');
       }
       await this.redisService.del(betKey);
+      await this.redisService.srem(`active_bets_set:${roomType}`, betKey);
 
       const betRecord = JSON.parse(raw);
       const betAmountUSD = Number(betRecord.amountUSD || betRecord.amount || 0);
@@ -1012,12 +1020,27 @@ export class AuthService implements OnModuleInit {
         return;
       }
       await this.redisService.del(betKey);
+      await this.redisService.srem(`active_bets_set:${roomType}`, betKey);
 
       const betRecord = JSON.parse(raw);
       const betAmountUSD = Number(betRecord.amountUSD || betRecord.amount || 0);
       const crashPoint = this.gameService.getCrashPoint(roomType);
 
       if (targetMultiplier > crashPoint) {
+        // Plane crashed before or during auto-cashout execution: record settled lost bet
+        try {
+          await this.betHistoryRepository.save({
+            userId,
+            betAmount: betAmountUSD,
+            cashOutMultiplier: null,
+            crashPoint,
+            winAmount: 0,
+            currency: 'USD',
+          });
+          await this.userRepository.increment({ id: userId }, 'gamesPlayed', 1);
+        } catch (err) {
+          this.logger.error('Failed to log lost auto-cashout bet during crash race', err);
+        }
         return;
       }
 
@@ -1102,6 +1125,7 @@ export class AuthService implements OnModuleInit {
         return;
       }
       await this.redisService.del(betKey);
+      await this.redisService.srem(`active_bets_set:${GameRoomType.MARKETING}`, betKey);
 
       const betRecord = JSON.parse(raw);
       const betAmountDisplay = Number(betRecord.amount);
@@ -1176,24 +1200,21 @@ export class AuthService implements OnModuleInit {
 
   async handleRoundCrashed(crashPoint: number, roomType: GameRoomType = GameRoomType.STANDARD) {
     try {
-      const activeKeys = await this.redisService.keys('active_bet:*');
+      const setKey = `active_bets_set:${roomType}`;
+      const activeKeys = await this.redisService.smembers(setKey);
+      await this.redisService.del(setKey);
+
       if (!activeKeys || activeKeys.length === 0) return;
 
-      this.logger.log(`Settling uncashed bets for [${roomType}] after crash at ${crashPoint}`);
+      this.logger.log(`Settling uncashed bets for [${roomType}] (${activeKeys.length} bet(s)) after crash at ${crashPoint}`);
 
       for (const key of activeKeys) {
         try {
           const raw = await this.redisService.get(key);
           if (!raw) continue;
-          const betRecord = JSON.parse(raw);
-          const betRoom = betRecord.roomType || GameRoomType.STANDARD;
-
-          // Only settle bets that belong to this crashed room
-          if (betRoom !== roomType) {
-            continue;
-          }
-
           await this.redisService.del(key);
+
+          const betRecord = JSON.parse(raw);
           const betAmountUSD = Number(betRecord.amountUSD || betRecord.amount || 0);
           await this.betHistoryRepository.save({
             userId: betRecord.userId,
@@ -1209,32 +1230,27 @@ export class AuthService implements OnModuleInit {
         }
       }
     } catch (err) {
-      this.logger.error(`Error scanning active bets during crash cleanup for ${roomType}`, err);
+      this.logger.error(`Error settling active bets during crash cleanup for ${roomType}`, err);
     }
   }
 
   async activateQueuedBets(roomType: GameRoomType = GameRoomType.STANDARD): Promise<void> {
     try {
-      const keys = await this.redisService.keys('queued_bet:*');
+      const setKey = `queued_bets_set:${roomType}`;
+      const keys = await this.redisService.smembers(setKey);
+      await this.redisService.del(setKey);
+
       if (!keys || keys.length === 0) return;
 
-      this.logger.log(`Activating queued bet(s) for [${roomType}] new round...`);
+      this.logger.log(`Activating queued bet(s) for [${roomType}] (${keys.length} bet(s)) on new round...`);
 
       for (const key of keys) {
         try {
           const raw = await this.redisService.get(key);
           if (!raw) continue;
-
-          const betRecord = JSON.parse(raw);
-          const betRoom = betRecord.roomType || GameRoomType.STANDARD;
-
-          // Only activate queued bets that belong to the room starting its new round
-          if (betRoom !== roomType) {
-            continue;
-          }
-
           await this.redisService.del(key);
 
+          const betRecord = JSON.parse(raw);
           const activeKey = `active_bet:${betRecord.userId}:${betRecord.betIndex}`;
 
           const user = await this.userRepository.findOne({ where: { id: betRecord.userId } });
@@ -1246,6 +1262,7 @@ export class AuthService implements OnModuleInit {
           betRecord.activatedAt = Date.now();
 
           await this.redisService.set(activeKey, JSON.stringify(betRecord), 180);
+          await this.redisService.sadd(`active_bets_set:${roomType}`, activeKey);
 
           await this.gameService.registerRealBet(betRecord.amountUSD, isMarketing, roomType);
           this.gameService.addRealUserBet({

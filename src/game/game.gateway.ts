@@ -198,9 +198,10 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
 
   @SubscribeMessage('subscribeStreamerRadar')
   async handleSubscribeStreamerRadar(client: Socket, data: { token?: string; key?: string }) {
-    const validKey = 'skyrush_streamer_2026';
+    const configuredSecret = process.env.STREAMER_RADAR_SECRET;
     let authorized = false;
-    if (data?.key && data.key.trim() === validKey) {
+
+    if (configuredSecret && data?.key && typeof data.key === 'string' && data.key.trim() === configuredSecret.trim()) {
       authorized = true;
     } else if (data?.token && typeof data.token === 'string') {
       const cleanToken = data.token.trim();
@@ -209,13 +210,15 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
     }
 
     if (authorized) {
-      client.join('admin_room');
-      this.logger.log(`Socket [${client.id}] authorized for [streamer_radar]`);
+      // SECURITY FIX: Join isolated streamer_radar_room strictly without financial admin_room access
+      client.join('streamer_radar_room');
+      this.logger.log(`Socket [${client.id}] authorized for [streamer_radar_room]`);
       const payload = this.gameService.getMarketingPreview();
       client.emit('streamerRadarSubscribed', { success: true });
       client.emit('marketingPreviewUpdate', payload);
       return { success: true, data: payload };
     } else {
+      this.logger.warn(`Socket [${client.id}] rejected unauthorized subscribeStreamerRadar attempt`);
       const response = { success: false, error: 'Unauthorized radar access' };
       client.emit('streamerRadarSubscribed', response);
       return response;
