@@ -179,7 +179,7 @@ export class GameService implements OnModuleInit {
     }
   }
 
-  // Minimum safety floor to prevent infinite forced 1.01x crash loops ($20.00 USD)
+  // Minimum safety floor for platform operational reserve ($20.00 USD)
   public static readonly MIN_POOL_FLOOR: number = 20.0;
 
   public getGlobalPool(): number {
