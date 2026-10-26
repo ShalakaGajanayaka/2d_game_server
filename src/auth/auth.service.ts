@@ -139,6 +139,10 @@ export class AuthService implements OnModuleInit {
       await this.executeMarketingAutoCashout(userId, betIndex, multiplier);
     });
 
+    this.gameService.registerRealAutoCashoutCallback(async (userId: string, betIndex: number, multiplier: number, roomType: GameRoomType) => {
+      await this.executeRealAutoCashout(userId, betIndex, multiplier, roomType);
+    });
+
     this.gameService.registerRoundStartCallback(async (roomType: GameRoomType) => {
       await this.activateQueuedBets(roomType);
     });
@@ -616,7 +620,7 @@ export class AuthService implements OnModuleInit {
     return user;
   }
 
-  async placeGameBet(token: string, betIndex: number, amount: number) {
+  async placeGameBet(token: string, betIndex: number, amount: number, autoCashout?: number | null) {
     if (betIndex !== 1 && betIndex !== 2) {
       throw new BadRequestException('Invalid bet slot index (must be 1 or 2)');
     }
@@ -625,6 +629,11 @@ export class AuthService implements OnModuleInit {
     const isMarketingUser = !!user.isMarketing;
     const roomType = isMarketingUser ? GameRoomType.MARKETING : GameRoomType.STANDARD;
     const isWaiting = this.gameService.getStatus(roomType) === GameStatus.WAITING;
+
+    let validAutoCashout: number | null = null;
+    if (autoCashout && typeof autoCashout === 'number' && autoCashout >= 1.01) {
+      validAutoCashout = parseFloat(Number(autoCashout).toFixed(2));
+    }
 
     // Pure USD Bet Range: $1.00 min to $500.00 max
     const minBet = 1.0;
@@ -704,6 +713,7 @@ export class AuthService implements OnModuleInit {
         amount: cleanAmount,
         amountUSD: cleanAmount,
         currency: 'USD',
+        autoCashout: validAutoCashout,
         rate: 1.0,
         roomType,
         roundStartTime: isWaiting ? this.gameService.getStartTime(roomType) : null,
@@ -723,9 +733,20 @@ export class AuthService implements OnModuleInit {
           id: betId,
           name: savedUser!.username,
           bet: cleanAmount,
-          targetMultiplier: 0,
+          targetMultiplier: validAutoCashout || 0,
           cashedOut: false,
         }, roomType);
+
+        if (validAutoCashout) {
+          this.gameService.registerRealAutoCashoutBet({
+            betId,
+            userId: savedUser!.id,
+            username: savedUser!.username,
+            betIndex,
+            targetMultiplier: validAutoCashout,
+            roomType,
+          });
+        }
 
         if (isMarketingAutoWin) {
           this.gameService.registerMarketingAutoWinBet({
@@ -977,6 +998,96 @@ export class AuthService implements OnModuleInit {
     }
   }
 
+  async executeRealAutoCashout(userId: string, betIndex: number, targetMultiplier: number, roomType: GameRoomType) {
+    const lockKey = `lock:cashout:${userId}:${betIndex}`;
+    const acquired = await this.redisService.acquireLock(lockKey, 3);
+    if (!acquired) {
+      return;
+    }
+
+    try {
+      const betKey = `active_bet:${userId}:${betIndex}`;
+      const raw = await this.redisService.get(betKey);
+      if (!raw) {
+        return;
+      }
+      await this.redisService.del(betKey);
+
+      const betRecord = JSON.parse(raw);
+      const betAmountUSD = Number(betRecord.amountUSD || betRecord.amount || 0);
+      const crashPoint = this.gameService.getCrashPoint(roomType);
+
+      if (targetMultiplier > crashPoint) {
+        return;
+      }
+
+      const MAX_PAYOUT_USD = 10000.0;
+      const rawWinUSD = parseFloat((betAmountUSD * targetMultiplier).toFixed(2));
+      const winAmountUSD = Math.min(rawWinUSD, MAX_PAYOUT_USD);
+      const profitUSD = parseFloat((winAmountUSD - betAmountUSD).toFixed(2));
+      const displayWinAmount = winAmountUSD;
+
+      let savedUser: User | null = null;
+      await this.userRepository.manager.transaction(async (manager) => {
+        const lockedUser = await manager.findOne(User, {
+          where: { id: userId },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!lockedUser) return;
+
+        const newBalanceUSD = parseFloat((Number(lockedUser.balance) + winAmountUSD).toFixed(6));
+        lockedUser.balance = newBalanceUSD;
+        lockedUser.gamesPlayed = Number(lockedUser.gamesPlayed) + 1;
+        if (profitUSD > 0) {
+          lockedUser.totalWon = parseFloat((Number(lockedUser.totalWon) + profitUSD).toFixed(6));
+        }
+        if (targetMultiplier > Number(lockedUser.bestMultiplier)) {
+          lockedUser.bestMultiplier = targetMultiplier;
+        }
+
+        savedUser = await manager.save(lockedUser);
+
+        await manager.save(Transaction, {
+          userId: savedUser.id,
+          type: 'AUTO_CASHOUT',
+          amount: winAmountUSD,
+          currency: 'USD',
+          multiplier: targetMultiplier,
+          balanceAfter: newBalanceUSD,
+        });
+
+        await manager.save(BetHistory, {
+          userId: savedUser.id,
+          betAmount: betAmountUSD,
+          cashOutMultiplier: targetMultiplier,
+          crashPoint,
+          winAmount: winAmountUSD,
+          currency: 'USD',
+        });
+      });
+
+      if (!savedUser) return;
+      const userObj: User = savedUser;
+
+      const isMarketingUser = !!userObj.isMarketing;
+      await this.gameService.registerRealCashout(betAmountUSD, winAmountUSD, isMarketingUser, roomType);
+      this.gameService.markRealUserCashout(betRecord.id, targetMultiplier, displayWinAmount, roomType);
+      this.gameService.notifyUserBalance(userObj.username, Number(userObj.balance), `🎯 Auto-Cashout Won: +$${displayWinAmount.toFixed(2)} USD`, 'USD');
+      this.gameService.notifyAutoCashoutSuccess(userObj.username, betIndex, targetMultiplier, displayWinAmount, Number(userObj.balance));
+
+      const sanitized = this.sanitizeUser(userObj);
+      try {
+        await this.redisService.set(`user:${userObj.username.toLowerCase()}`, JSON.stringify(sanitized));
+      } catch {}
+
+      this.logger.log(`[Auto-Cashout Engine][${roomType}] Successfully executed auto-cashout for ${userObj.username} (Slot ${betIndex}): +$${displayWinAmount.toFixed(2)} USD at ${targetMultiplier}x`);
+    } catch (err) {
+      this.logger.error(`[Auto-Cashout Engine] Error executing auto-cashout for user ${userId}`, err);
+    } finally {
+      await this.redisService.releaseLock(lockKey);
+    }
+  }
+
   async executeMarketingAutoCashout(userId: string, betIndex: number, currentMultiplier: number) {
     const lockKey = `lock:cashout:${userId}:${betIndex}`;
     const acquired = await this.redisService.acquireLock(lockKey, 3);
@@ -1141,9 +1252,20 @@ export class AuthService implements OnModuleInit {
             id: betRecord.id,
             name: betRecord.username,
             bet: betRecord.amount,
-            targetMultiplier: 0,
+            targetMultiplier: betRecord.autoCashout || 0,
             cashedOut: false,
           }, roomType);
+
+          if (betRecord.autoCashout) {
+            this.gameService.registerRealAutoCashoutBet({
+              betId: betRecord.id,
+              userId: betRecord.userId,
+              username: betRecord.username,
+              betIndex: betRecord.betIndex,
+              targetMultiplier: betRecord.autoCashout,
+              roomType,
+            });
+          }
 
           if (isMarketingAutoWin) {
             this.gameService.registerMarketingAutoWinBet({

@@ -87,10 +87,15 @@ export class AuthController {
   @Post('game-bet')
   async placeGameBet(
     @Headers('authorization') authHeader: string,
-    @Body() body: { token?: string; betIndex: number; amount: number },
+    @Body() body: { token?: string; betIndex: number; amount: number; autoCashout?: number | null },
   ) {
     const token = this.extractToken(authHeader, body?.token);
-    return this.authService.placeGameBet(token, Number(body.betIndex), Number(body.amount));
+    return this.authService.placeGameBet(
+      token,
+      Number(body.betIndex),
+      Number(body.amount),
+      body.autoCashout != null ? Number(body.autoCashout) : null,
+    );
   }
 
   @Post('game-cancel-bet')

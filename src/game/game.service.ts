@@ -32,6 +32,15 @@ export interface MarketingAutoWinBet {
   targetAutoCashout?: number;
 }
 
+export interface RealAutoCashoutBet {
+  betId: string;
+  userId: string;
+  username: string;
+  betIndex: number;
+  targetMultiplier: number;
+  roomType: GameRoomType;
+}
+
 const NAME_PREFIXES = [
   'alex', 'sam', 'johnd', 'crypto', 'sky', 'lucky', 'bet', 'speedy', 'elena',
   'king', 'queen', 'ace', 'falcon', 'neo', 'shadow', 'zenith', 'rocket', 'viper',
@@ -90,6 +99,7 @@ export class GameRoomState {
 
   activeRealLiability: number = 0;
   activeMarketingAutoWinBets: MarketingAutoWinBet[] = [];
+  activeRealAutoCashoutBets: RealAutoCashoutBet[] = [];
 
   constructor(roomType: GameRoomType) {
     this.roomType = roomType;
@@ -112,6 +122,7 @@ export class GameService implements OnModuleInit {
   private crashCallbacks: Array<(crashPoint: number, roomType: GameRoomType) => void> = [];
   private roundStartCallbacks: Array<(roomType: GameRoomType) => Promise<void> | void> = [];
   private marketingAutoCashoutCallback: ((userId: string, betIndex: number, multiplier: number) => Promise<void>) | null = null;
+  private realAutoCashoutCallback: ((userId: string, betIndex: number, multiplier: number, roomType: GameRoomType) => Promise<void>) | null = null;
 
   constructor(private readonly redisService: RedisService) {
     this.rooms.set(GameRoomType.STANDARD, new GameRoomState(GameRoomType.STANDARD));
@@ -324,6 +335,7 @@ export class GameService implements OnModuleInit {
     const room = this.getRoom(roomType);
     room.currentRoundBets = room.currentRoundBets.filter(b => b.id !== betId);
     this.removeMarketingAutoWinBet(betId);
+    this.removeRealAutoCashoutBet(betId);
     if (this.server) {
       this.server.to(`room:${roomType}`).emit('betCancelled', { id: betId });
     }
@@ -337,6 +349,7 @@ export class GameService implements OnModuleInit {
       bet.cashedOutMultiplier = multiplier;
     }
     this.removeMarketingAutoWinBet(betId);
+    this.removeRealAutoCashoutBet(betId);
     if (this.server) {
       this.server.to(`room:${roomType}`).emit('betCashedOut', {
         id: betId,
@@ -359,6 +372,38 @@ export class GameService implements OnModuleInit {
 
   public registerMarketingAutoCashoutCallback(cb: (userId: string, betIndex: number, multiplier: number) => Promise<void>) {
     this.marketingAutoCashoutCallback = cb;
+  }
+
+  public registerRealAutoCashoutCallback(cb: (userId: string, betIndex: number, multiplier: number, roomType: GameRoomType) => Promise<void>) {
+    this.realAutoCashoutCallback = cb;
+  }
+
+  public registerRealAutoCashoutBet(bet: RealAutoCashoutBet) {
+    const room = this.getRoom(bet.roomType);
+    // Remove duplicate entry if exists
+    room.activeRealAutoCashoutBets = room.activeRealAutoCashoutBets.filter(b => b.betId !== bet.betId);
+    room.activeRealAutoCashoutBets.push(bet);
+    this.logger.log(`[Auto-Cashout Engine][${bet.roomType}] Registered server-authoritative auto-cashout for ${bet.username} (Slot ${bet.betIndex}, Target: ${bet.targetMultiplier}x)`);
+  }
+
+  public removeRealAutoCashoutBet(betId: string) {
+    for (const room of this.rooms.values()) {
+      room.activeRealAutoCashoutBets = room.activeRealAutoCashoutBets.filter(b => b.betId !== betId);
+    }
+  }
+
+  public notifyAutoCashoutSuccess(username: string, betIndex: number, multiplier: number, winAmount: number, balance: number) {
+    if (this.server) {
+      const payload = {
+        username,
+        betIndex,
+        multiplier,
+        winAmount,
+        balance,
+        timestamp: Date.now(),
+      };
+      this.server.to(`user:${username.toLowerCase()}`).emit('autoCashoutSuccess', payload);
+    }
   }
 
   public registerMarketingAutoWinBet(bet: MarketingAutoWinBet) {
@@ -679,6 +724,22 @@ export class GameService implements OnModuleInit {
         }
       }
 
+      // Check for real player authoritative auto-cashouts
+      if (room.activeRealAutoCashoutBets && room.activeRealAutoCashoutBets.length > 0) {
+        for (let i = room.activeRealAutoCashoutBets.length - 1; i >= 0; i--) {
+          const rBet = room.activeRealAutoCashoutBets[i];
+          if (room.currentMultiplier >= rBet.targetMultiplier && rBet.targetMultiplier <= room.crashPoint) {
+            room.activeRealAutoCashoutBets.splice(i, 1);
+            this.logger.log(`[Auto-Cashout Engine][${roomType}] Auto-cashout triggered on server for ${rBet.username} (Slot ${rBet.betIndex}) at ${rBet.targetMultiplier}x (Current: ${room.currentMultiplier.toFixed(2)}x, Crash: ${room.crashPoint}x)`);
+            if (this.realAutoCashoutCallback) {
+              this.realAutoCashoutCallback(rBet.userId, rBet.betIndex, rBet.targetMultiplier, rBet.roomType).catch(err => {
+                this.logger.error(`[Auto-Cashout Engine] Error executing auto-cashout for ${rBet.username}`, err);
+              });
+            }
+          }
+        }
+      }
+
       if (room.currentMultiplier >= room.crashPoint) {
         this.crash(roomType);
       }
@@ -691,6 +752,7 @@ export class GameService implements OnModuleInit {
 
     room.status = GameStatus.CRASHED;
     room.currentMultiplier = room.crashPoint;
+    room.activeRealAutoCashoutBets = [];
 
     room.previousRound = {
       roundNumber: room.roundNumber,
