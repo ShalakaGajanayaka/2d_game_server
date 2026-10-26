@@ -324,6 +324,25 @@ export class AdminController {
   }
 
   @UseGuards(AdminAuthGuard)
+  @Post('api/system/maintenance/schedule')
+  async scheduleMaintenance(@Body() body: { minutes?: number; message?: string }) {
+    const minutes = Math.max(1, Math.min(180, Number(body.minutes || 15)));
+    return this.adminService.scheduleSystemMaintenance(minutes, body.message);
+  }
+
+  @UseGuards(AdminAuthGuard)
+  @Post('api/system/maintenance/cancel')
+  async cancelMaintenance() {
+    return this.adminService.cancelSystemMaintenance();
+  }
+
+  @UseGuards(AdminAuthGuard)
+  @Get('api/system/maintenance/status')
+  async getMaintenanceStatus() {
+    return this.adminService.getSystemMaintenanceStatus();
+  }
+
+  @UseGuards(AdminAuthGuard)
   @Get('api/deposits')
   async getDeposits(
     @Query('status') status?: string,

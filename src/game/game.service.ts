@@ -7,6 +7,7 @@ export enum GameStatus {
   WAITING = 'waiting',
   PLAYING = 'playing',
   CRASHED = 'crashed',
+  MAINTENANCE = 'maintenance',
 }
 
 export enum GameRoomType {
@@ -125,6 +126,14 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
   private marketingAutoCashoutCallback: ((userId: string, betIndex: number, multiplier: number) => Promise<void>) | null = null;
   private realAutoCashoutCallback: ((userId: string, betIndex: number, multiplier: number, roomType: GameRoomType) => Promise<void>) | null = null;
 
+  // Maintenance Mode orchestration
+  private isMaintenanceScheduled: boolean = false;
+  private isMaintenanceActive: boolean = false;
+  private maintenanceTargetTime: number | null = null;
+  private maintenanceMessage: string = 'Scheduled system maintenance in progress.';
+  private maintenanceCheckTimer: NodeJS.Timeout | null = null;
+  private maintenanceActivateCallback: ((roomType: GameRoomType) => Promise<void>) | null = null;
+
   constructor(private readonly redisService: RedisService) {
     this.rooms.set(GameRoomType.STANDARD, new GameRoomState(GameRoomType.STANDARD));
     this.rooms.set(GameRoomType.MARKETING, new GameRoomState(GameRoomType.MARKETING));
@@ -199,6 +208,181 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
         clearTimeout(room.postCrashTimer);
         room.postCrashTimer = null;
       }
+    }
+    if (this.maintenanceCheckTimer) {
+      clearInterval(this.maintenanceCheckTimer);
+      this.maintenanceCheckTimer = null;
+    }
+  }
+
+  public registerMaintenanceActivateCallback(callback: (roomType: GameRoomType) => Promise<void>) {
+    this.maintenanceActivateCallback = callback;
+  }
+
+  public isMaintenanceModeActive(): boolean {
+    return this.isMaintenanceActive;
+  }
+
+  public isMaintenanceModeScheduled(): boolean {
+    return this.isMaintenanceScheduled;
+  }
+
+  public isMaintenanceImminent(thresholdMs: number = 60000): boolean {
+    if (!this.isMaintenanceScheduled || !this.maintenanceTargetTime) return false;
+    return (this.maintenanceTargetTime - Date.now()) <= thresholdMs;
+  }
+
+  public getMaintenanceStatus() {
+    return {
+      isScheduled: this.isMaintenanceScheduled,
+      isActive: this.isMaintenanceActive,
+      targetTime: this.maintenanceTargetTime,
+      remainingSeconds: this.maintenanceTargetTime
+        ? Math.max(0, Math.floor((this.maintenanceTargetTime - Date.now()) / 1000))
+        : 0,
+      message: this.maintenanceMessage,
+    };
+  }
+
+  public async scheduleMaintenance(minutes: number = 15, message?: string) {
+    this.isMaintenanceScheduled = true;
+    this.isMaintenanceActive = false;
+    this.maintenanceTargetTime = Date.now() + minutes * 60 * 1000;
+    this.maintenanceMessage = message || `Scheduled system maintenance will begin in ${minutes} minutes. New rounds will be paused.`;
+
+    this.logger.warn(`🛑 [Maintenance] Scheduled maintenance initiated for +${minutes}m (Target: ${new Date(this.maintenanceTargetTime).toISOString()})`);
+
+    try {
+      await this.redisService.set(
+        'system:maintenance_state',
+        JSON.stringify({
+          isScheduled: true,
+          isActive: false,
+          targetTime: this.maintenanceTargetTime,
+          message: this.maintenanceMessage,
+        }),
+        minutes * 60 + 3600,
+      );
+    } catch {}
+
+    const payload = {
+      type: 'maintenance_scheduled',
+      minutes,
+      targetTime: this.maintenanceTargetTime,
+      message: this.maintenanceMessage,
+      timestamp: Date.now(),
+    };
+
+    if (this.server) {
+      this.server.emit('maintenanceNotice', payload);
+      this.server.emit('systemAnnouncement', payload);
+    }
+
+    if (this.maintenanceCheckTimer) clearInterval(this.maintenanceCheckTimer);
+    this.maintenanceCheckTimer = setInterval(() => {
+      if (this.maintenanceTargetTime && Date.now() >= this.maintenanceTargetTime) {
+        if (this.maintenanceCheckTimer) {
+          clearInterval(this.maintenanceCheckTimer);
+          this.maintenanceCheckTimer = null;
+        }
+        this.triggerImmediateMaintenance();
+      }
+    }, 1000);
+
+    return this.getMaintenanceStatus();
+  }
+
+  public async cancelMaintenance() {
+    this.logger.log('✅ [Maintenance] Maintenance cancelled by administrator.');
+    this.isMaintenanceScheduled = false;
+    this.maintenanceTargetTime = null;
+    if (this.maintenanceCheckTimer) {
+      clearInterval(this.maintenanceCheckTimer);
+      this.maintenanceCheckTimer = null;
+    }
+
+    try {
+      await this.redisService.del('system:maintenance_state');
+    } catch {}
+
+    const wasActive = this.isMaintenanceActive;
+    this.isMaintenanceActive = false;
+
+    // If already in maintenance mode, restore games
+    if (wasActive) {
+      for (const roomType of [GameRoomType.STANDARD, GameRoomType.MARKETING]) {
+        const room = this.rooms.get(roomType)!;
+        if (room.status === GameStatus.MAINTENANCE) {
+          this.startCountdown(roomType);
+        }
+      }
+    }
+
+    const payload = {
+      type: 'maintenance_cancelled',
+      message: 'Scheduled maintenance cancelled. Games are operating normally.',
+      timestamp: Date.now(),
+    };
+
+    if (this.server) {
+      this.server.emit('maintenanceCancelled', payload);
+      this.server.emit('systemAnnouncement', payload);
+    }
+
+    return this.getMaintenanceStatus();
+  }
+
+  public async triggerImmediateMaintenance() {
+    this.isMaintenanceActive = true;
+    this.logger.warn('⚠️ [Maintenance] Cutoff reached. Executing room-by-room maintenance freeze...');
+
+    for (const roomType of [GameRoomType.STANDARD, GameRoomType.MARKETING]) {
+      const room = this.rooms.get(roomType)!;
+      if (room.status === GameStatus.WAITING) {
+        await this.activateMaintenanceMode(roomType);
+      }
+    }
+  }
+
+  public async activateMaintenanceMode(roomType: GameRoomType) {
+    const room = this.rooms.get(roomType)!;
+    room.status = GameStatus.MAINTENANCE;
+    this.isMaintenanceActive = true;
+
+    if (room.timer) {
+      clearInterval(room.timer);
+      room.timer = null;
+    }
+    if (room.botStreamTimer) {
+      clearInterval(room.botStreamTimer);
+      room.botStreamTimer = null;
+    }
+    if (room.gameLoopTimer) {
+      clearInterval(room.gameLoopTimer);
+      room.gameLoopTimer = null;
+    }
+
+    this.logger.warn(`🛑 [Room: ${roomType.toUpperCase()}] Entered MAINTENANCE status. Refunding queued bets...`);
+
+    if (this.maintenanceActivateCallback) {
+      try {
+        await this.maintenanceActivateCallback(roomType);
+      } catch (err: any) {
+        this.logger.error(`Error refunding queued bets on maintenance activation for ${roomType}`, err);
+      }
+    }
+
+    this.broadcastState(roomType, false);
+
+    const payload = {
+      roomType,
+      status: 'maintenance',
+      message: this.maintenanceMessage || 'SkyRush is currently undergoing scheduled maintenance.',
+      timestamp: Date.now(),
+    };
+
+    if (this.server) {
+      this.server.to(`room:${roomType}`).emit('maintenanceActive', payload);
     }
   }
 
@@ -553,6 +737,11 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    if (this.isMaintenanceActive || (this.maintenanceTargetTime && Date.now() >= this.maintenanceTargetTime)) {
+      this.activateMaintenanceMode(roomType);
+      return;
+    }
+
     room.status = GameStatus.WAITING;
     room.countdown = 10;
     room.targetStartTime = Date.now() + 10000;
@@ -815,7 +1004,11 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
     // Wait 3 seconds before next round
     room.postCrashTimer = setTimeout(() => {
       room.postCrashTimer = null;
-      this.startCountdown(roomType);
+      if (this.isMaintenanceActive || (this.maintenanceTargetTime && Date.now() >= this.maintenanceTargetTime)) {
+        this.activateMaintenanceMode(roomType);
+      } else {
+        this.startCountdown(roomType);
+      }
     }, 3000);
   }
 
@@ -912,6 +1105,7 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
       crashPoint: room.status === GameStatus.CRASHED ? room.crashPoint : null,
       targetCrashPoint: roomType === GameRoomType.MARKETING ? room.crashPoint : null,
       serverTime: Date.now(),
+      maintenance: this.getMaintenanceStatus(),
       bets: includeFullBets ? room.currentRoundBets : null,
       provablyFair: {
         roundNumber: room.roundNumber,

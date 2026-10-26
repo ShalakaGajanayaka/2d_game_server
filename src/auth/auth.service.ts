@@ -146,6 +146,10 @@ export class AuthService implements OnModuleInit {
     this.gameService.registerRoundStartCallback(async (roomType: GameRoomType) => {
       await this.activateQueuedBets(roomType);
     });
+
+    this.gameService.registerMaintenanceActivateCallback(async (roomType: GameRoomType) => {
+      await this.refundAllQueuedBets(roomType);
+    });
   }
 
   private generateToken(): string {
@@ -629,6 +633,14 @@ export class AuthService implements OnModuleInit {
     const isMarketingUser = !!user.isMarketing;
     const roomType = isMarketingUser ? GameRoomType.MARKETING : GameRoomType.STANDARD;
     const isWaiting = this.gameService.getStatus(roomType) === GameStatus.WAITING;
+
+    if (this.gameService.isMaintenanceModeActive() || this.gameService.getStatus(roomType) === GameStatus.MAINTENANCE) {
+      throw new BadRequestException('Betting is temporarily disabled due to scheduled system maintenance');
+    }
+
+    if (!isWaiting && this.gameService.isMaintenanceImminent()) {
+      throw new BadRequestException('Queuing bets for future rounds is disabled because maintenance is starting shortly');
+    }
 
     let validAutoCashout: number | null = null;
     if (autoCashout && typeof autoCashout === 'number' && autoCashout >= 1.01) {
@@ -1302,6 +1314,67 @@ export class AuthService implements OnModuleInit {
       }
     } catch (err) {
       this.logger.error(`Error scanning queued bets during round start for ${roomType}`, err);
+    }
+  }
+
+  async refundAllQueuedBets(roomType: GameRoomType = GameRoomType.STANDARD): Promise<number> {
+    try {
+      const setKey = `queued_bets_set:${roomType}`;
+      const keys = await this.redisService.smembers(setKey);
+      await this.redisService.del(setKey);
+
+      if (!keys || keys.length === 0) return 0;
+
+      this.logger.log(`Refunding ${keys.length} queued bet(s) for [${roomType}] due to scheduled maintenance...`);
+      let refundedCount = 0;
+
+      for (const key of keys) {
+        try {
+          const raw = await this.redisService.get(key);
+          if (!raw) continue;
+          await this.redisService.del(key);
+
+          const betRecord = JSON.parse(raw);
+          const refundAmountUSD = Number(betRecord.amountUSD || betRecord.amount || 0);
+
+          await this.userRepository.manager.transaction(async (manager) => {
+            const lockedUser = await manager.findOne(User, {
+              where: { id: betRecord.userId },
+              lock: { mode: 'pessimistic_write' },
+            });
+            if (!lockedUser) return;
+
+            const newBalanceUSD = parseFloat((Number(lockedUser.balance) + refundAmountUSD).toFixed(6));
+            lockedUser.balance = newBalanceUSD;
+            const savedUser = await manager.save(lockedUser);
+
+            await manager.save(Transaction, {
+              userId: savedUser.id,
+              type: 'CANCEL_QUEUED_BET_MAINTENANCE',
+              amount: refundAmountUSD,
+              description: `Queued bet #${betRecord.betIndex + 1} auto-refunded due to scheduled maintenance`,
+              status: 'COMPLETED',
+            });
+
+            const userRate = PLATFORM_EXCHANGE_RATES[(savedUser.currency || 'USD').toUpperCase()] || 1.0;
+            const displayBal = Math.round((Number(savedUser.balance) * userRate) * 100) / 100;
+            this.gameService.notifyUserBalance(
+              savedUser.username,
+              displayBal,
+              `⚠️ Queued bet #${betRecord.betIndex + 1} auto-refunded ($${refundAmountUSD.toFixed(2)}) due to upcoming maintenance`,
+              savedUser.currency,
+            );
+          });
+          refundedCount++;
+        } catch (itemErr: any) {
+          this.logger.error(`Error refunding queued bet key ${key}`, itemErr);
+        }
+      }
+      this.logger.log(`Successfully auto-refunded ${refundedCount} queued bet(s) for [${roomType}]`);
+      return refundedCount;
+    } catch (err: any) {
+      this.logger.error(`Error refunding queued bets for ${roomType}`, err);
+      return 0;
     }
   }
 

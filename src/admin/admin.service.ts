@@ -58,6 +58,20 @@ export class AdminService implements OnModuleInit {
     }, 60 * 60 * 1000);
   }
 
+  async scheduleSystemMaintenance(minutes: number = 15, message?: string) {
+    this.logger.warn(`Admin initiated system maintenance countdown: ${minutes} minutes`);
+    return this.gameService.scheduleMaintenance(minutes, message);
+  }
+
+  async cancelSystemMaintenance() {
+    this.logger.log(`Admin cancelled scheduled system maintenance`);
+    return this.gameService.cancelMaintenance();
+  }
+
+  getSystemMaintenanceStatus() {
+    return this.gameService.getMaintenanceStatus();
+  }
+
   getPaymentChannels(): PaymentChannel[] {
     return [
       {
