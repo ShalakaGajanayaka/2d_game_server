@@ -1,11 +1,12 @@
 import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException, ConflictException, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, ILike } from 'typeorm';
+import { Repository, ILike, MoreThan } from 'typeorm';
 import { User } from '../auth/entities/user.entity';
 import { Transaction } from '../auth/entities/transaction.entity';
 import { DepositRequest, DepositStatus } from '../auth/entities/deposit-request.entity';
 import { WithdrawalRequest, WithdrawalStatus } from '../auth/entities/withdrawal-request.entity';
 import { PoolAuditLog } from '../auth/entities/pool-audit-log.entity';
+import { BetHistory } from '../auth/entities/bet-history.entity';
 import { RedisService } from '../redis/redis.service';
 import { GameService } from '../game/game.service';
 import { PLATFORM_EXCHANGE_RATES } from '../auth/auth.service';
@@ -732,6 +733,41 @@ export class AdminService implements OnModuleInit {
         }
 
         const isMarketingUser = !!lockedUser.isMarketing;
+
+        // AML Wagering Policy (1x Turnover / Minimum 1 Bet Gate):
+        // Enforce that any player with deposited funds MUST place at least 1 flight bet before cashout
+        if (!isMarketingUser) {
+          const latestApprovedDeposit = await manager.findOne(DepositRequest, {
+            where: [
+              { userId: lockedUser.id, status: DepositStatus.APPROVED },
+              { username: lockedUser.username, status: DepositStatus.APPROVED },
+            ],
+            order: { approvedAt: 'DESC', createdAt: 'DESC' },
+          });
+
+          if (latestApprovedDeposit) {
+            const rawDepositTime = latestApprovedDeposit.approvedAt || latestApprovedDeposit.createdAt;
+            // Subtract 2 seconds buffer to avoid sub-second clock skew
+            const depositEffectiveTime = new Date(new Date(rawDepositTime).getTime() - 2000);
+
+            const betsSinceDeposit = await manager.count(BetHistory, {
+              where: {
+                userId: lockedUser.id,
+                createdAt: MoreThan(depositEffectiveTime),
+              },
+            });
+
+            if (betsSinceDeposit === 0) {
+              throw new BadRequestException(
+                'Wagering Policy (AML): You must place at least 1 flight bet with your deposited funds before requesting a withdrawal.',
+              );
+            }
+          } else if (Number(lockedUser.gamesPlayed || 0) === 0) {
+            throw new BadRequestException(
+              'Wagering Policy (AML): You must complete at least 1 flight round before requesting a withdrawal.',
+            );
+          }
+        }
 
         const currentBalanceUSD = Number(lockedUser.balance);
         const epsilon = 0.00001;
