@@ -1,5 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index, ManyToOne, JoinColumn } from 'typeorm';
-import { User } from './user.entity';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 'typeorm';
 
 @Entity('bet_history')
 @Index(['userId', 'createdAt'])
@@ -10,10 +9,6 @@ export class BetHistory {
   @Index()
   @Column()
   userId: string;
-
-  @ManyToOne(() => User, { onDelete: 'RESTRICT', nullable: true })
-  @JoinColumn({ name: 'userId' })
-  user?: User;
 
   @Column('decimal', { precision: 18, scale: 6 })
   betAmount: number;
