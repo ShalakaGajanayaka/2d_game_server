@@ -16,6 +16,7 @@ import { DepositRequest } from './auth/entities/deposit-request.entity';
 import { WithdrawalRequest } from './auth/entities/withdrawal-request.entity';
 import { BetHistory } from './auth/entities/bet-history.entity';
 import { PoolAuditLog } from './auth/entities/pool-audit-log.entity';
+import { GameRound } from './game/entities/game-round.entity';
 
 @Module({
   imports: [
@@ -54,7 +55,7 @@ import { PoolAuditLog } from './auth/entities/pool-audit-log.entity';
           username: config.get<string>('DB_USER', 'postgres'),
           password: dbPassword || (isProd ? '' : '12345678'),
           database: config.get<string>('DB_NAME', 'skyrush_db'),
-          entities: [User, Transaction, DepositRequest, WithdrawalRequest, BetHistory, PoolAuditLog],
+          entities: [User, Transaction, DepositRequest, WithdrawalRequest, BetHistory, PoolAuditLog, GameRound],
           synchronize: !isProd, // Auto-create tables in non-production, disable schema alteration in prod
           extra: {
             max: parseInt(config.get<string>('DB_POOL_MAX', '50'), 10),

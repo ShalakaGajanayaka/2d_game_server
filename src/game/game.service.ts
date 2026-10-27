@@ -1,7 +1,10 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy, BadRequestException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { Server } from 'socket.io';
 import * as crypto from 'crypto';
 import { RedisService } from '../redis/redis.service';
+import { GameRound } from './entities/game-round.entity';
 
 export enum GameStatus {
   WAITING = 'waiting',
@@ -135,7 +138,11 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
   private maintenanceCheckTimer: NodeJS.Timeout | null = null;
   private maintenanceActivateCallback: ((roomType: GameRoomType) => Promise<void>) | null = null;
 
-  constructor(private readonly redisService: RedisService) {
+  constructor(
+    private readonly redisService: RedisService,
+    @InjectRepository(GameRound)
+    private readonly gameRoundRepo: Repository<GameRound>,
+  ) {
     this.rooms.set(GameRoomType.STANDARD, new GameRoomState(GameRoomType.STANDARD));
     this.rooms.set(GameRoomType.MARKETING, new GameRoomState(GameRoomType.MARKETING));
   }
@@ -993,6 +1000,23 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`Failed to store revealed provably fair round for ${roomType} to Redis`, err);
     }
 
+    try {
+      this.gameRoundRepo
+        .save({
+          roomType,
+          roundNumber: room.roundNumber,
+          crashPoint: room.crashPoint,
+          serverSeed: room.currentServerSeed,
+          serverSeedHash: room.currentServerSeedHash,
+          clientSeed: room.currentClientSeed,
+        })
+        .catch((dbErr) => {
+          this.logger.error(`Failed to archive round #${room.roundNumber} to PostgreSQL`, dbErr);
+        });
+    } catch (err) {
+      this.logger.error(`Error saving round to PostgreSQL`, err);
+    }
+
     this.logger.log(
       `[Room: ${roomType.toUpperCase()}] Round #${room.roundNumber} crashed at ${room.crashPoint}x. ServerSeed revealed: ${room.currentServerSeed.slice(0, 16)}...`,
     );
@@ -1108,7 +1132,35 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
       const data = await this.redisService.get(`provably_fair:${roomType}:round:${roundNumber}:revealed`);
       if (data) return JSON.parse(data);
     } catch {}
+
+    // Fallback to PostgreSQL persistent ledger
+    try {
+      const roundRow = await this.gameRoundRepo.findOne({
+        where: { roomType, roundNumber },
+      });
+      if (roundRow) {
+        return {
+          roundNumber: Number(roundRow.roundNumber),
+          serverSeed: roundRow.serverSeed,
+          serverSeedHash: roundRow.serverSeedHash,
+          clientSeed: roundRow.clientSeed,
+          crashPoint: Number(roundRow.crashPoint),
+          createdAt: roundRow.createdAt,
+        };
+      }
+    } catch (err) {
+      this.logger.error(`Error querying round audit #${roundNumber} from PostgreSQL`, err);
+    }
+
     return null;
+  }
+
+  public async getRecentRounds(roomType: GameRoomType = GameRoomType.STANDARD, limit: number = 20) {
+    return this.gameRoundRepo.find({
+      where: { roomType },
+      order: { roundNumber: 'DESC' },
+      take: Math.min(limit, 100),
+    });
   }
 
   private broadcastState(roomType: GameRoomType, includeFullBets: boolean = true) {

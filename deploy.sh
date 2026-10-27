@@ -132,6 +132,14 @@ sudo -u postgres psql -d skyrush_db -c 'CREATE INDEX IF NOT EXISTS idx_bet_histo
 sudo -u postgres psql -d skyrush_db -c 'CREATE INDEX IF NOT EXISTS idx_deposit_status_created ON deposit_requests (status, "createdAt" DESC);' 2>/dev/null || true
 sudo -u postgres psql -d skyrush_db -c 'CREATE INDEX IF NOT EXISTS idx_withdrawal_status_created ON withdrawal_requests (status, "createdAt" DESC);' 2>/dev/null || true
 
+# Idempotent game_rounds table & foreign keys
+sudo -u postgres psql -d skyrush_db -c 'CREATE TABLE IF NOT EXISTS game_rounds (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), "roomType" VARCHAR(20) NOT NULL, "roundNumber" BIGINT NOT NULL, "crashPoint" DECIMAL(8,2) NOT NULL, "serverSeed" VARCHAR(255) NOT NULL, "serverSeedHash" VARCHAR(255) NOT NULL, "clientSeed" VARCHAR(255) NOT NULL, "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW());' 2>/dev/null || true
+sudo -u postgres psql -d skyrush_db -c 'CREATE INDEX IF NOT EXISTS idx_game_rounds_room_number ON game_rounds ("roomType", "roundNumber" DESC);' 2>/dev/null || true
+sudo -u postgres psql -d skyrush_db -c 'DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '\''fk_transactions_user'\'') THEN ALTER TABLE transactions ADD CONSTRAINT fk_transactions_user FOREIGN KEY ("userId") REFERENCES users(id) ON DELETE RESTRICT; END IF; END $$;' 2>/dev/null || true
+sudo -u postgres psql -d skyrush_db -c 'DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '\''fk_bet_history_user'\'') THEN ALTER TABLE bet_history ADD CONSTRAINT fk_bet_history_user FOREIGN KEY ("userId") REFERENCES users(id) ON DELETE RESTRICT; END IF; END $$;' 2>/dev/null || true
+sudo -u postgres psql -d skyrush_db -c 'DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '\''fk_deposit_requests_user'\'') THEN ALTER TABLE deposit_requests ADD CONSTRAINT fk_deposit_requests_user FOREIGN KEY ("userId") REFERENCES users(id) ON DELETE RESTRICT; END IF; END $$;' 2>/dev/null || true
+sudo -u postgres psql -d skyrush_db -c 'DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '\''fk_withdrawal_requests_user'\'') THEN ALTER TABLE withdrawal_requests ADD CONSTRAINT fk_withdrawal_requests_user FOREIGN KEY ("userId") REFERENCES users(id) ON DELETE RESTRICT; END IF; END $$;' 2>/dev/null || true
+
 # 6. Build & Launch Backend Server
 echo "🚀 [6/8] Building and Launching NestJS Backend..."
 cd /var/www/skyrush/server

@@ -81,4 +81,17 @@ export class GameController {
       data: audit,
     };
   }
+
+  @Get('recent')
+  async getRecentRounds(
+    @Query('room') roomType: any = 'standard',
+    @Query('limit') limitStr?: string,
+  ) {
+    const limit = limitStr ? parseInt(limitStr, 10) : 20;
+    const rounds = await this.gameService.getRecentRounds(roomType, isNaN(limit) ? 20 : limit);
+    return {
+      success: true,
+      data: rounds,
+    };
+  }
 }

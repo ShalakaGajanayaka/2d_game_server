@@ -5,7 +5,10 @@ import {
   CreateDateColumn,
   UpdateDateColumn,
   Index,
+  ManyToOne,
+  JoinColumn,
 } from 'typeorm';
+import { User } from './user.entity';
 
 export enum WithdrawalStatus {
   PENDING = 'PENDING',
@@ -23,6 +26,10 @@ export class WithdrawalRequest {
   @Index()
   @Column()
   userId: string;
+
+  @ManyToOne(() => User, { onDelete: 'RESTRICT', nullable: true })
+  @JoinColumn({ name: 'userId' })
+  user?: User;
 
   @Index()
   @Column()
