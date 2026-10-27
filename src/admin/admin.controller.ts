@@ -173,9 +173,19 @@ export class AdminController {
   }
 
   @Get('my-history')
-  async getMyHistory(@Query('token') token?: string) {
+  async getMyHistory(
+    @Headers('authorization') authHeader?: string,
+    @Query('token') queryToken?: string,
+  ) {
+    let token: string | undefined;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.replace('Bearer ', '').trim();
+    } else if (queryToken) {
+      token = String(queryToken).trim();
+    }
+
     if (!token) {
-      throw new UnauthorizedException('Session token required');
+      throw new UnauthorizedException('Session token required in Authorization Bearer header');
     }
 
     let username: string | null = null;

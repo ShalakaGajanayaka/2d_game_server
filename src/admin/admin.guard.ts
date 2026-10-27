@@ -12,12 +12,10 @@ export class AdminAuthGuard implements CanActivate {
 
     if (authHeader && authHeader.startsWith('Bearer ')) {
       token = authHeader.replace('Bearer ', '').trim();
-    } else if (request.query && request.query.token) {
-      token = String(request.query.token).trim();
     }
 
     if (!token) {
-      throw new UnauthorizedException('Admin token missing');
+      throw new UnauthorizedException('Admin token missing or not provided in Authorization Bearer header');
     }
 
     const isAdmin = await this.redisService.get(`admin_token:${token}`);

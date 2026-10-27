@@ -7,7 +7,37 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike } from 'typeorm';
 import { User } from '../auth/entities/user.entity';
 
-@WebSocketGateway({ cors: true })
+const isProd = process.env.NODE_ENV === 'production';
+const customOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim().toLowerCase())
+  .filter(Boolean);
+
+@WebSocketGateway({
+  cors: {
+    origin: (origin: string, callback: (err: Error | null, allow?: boolean) => void) => {
+      // Allow non-browser connections (mobile apps, curl, server-to-server)
+      if (!origin) return callback(null, true);
+
+      if (!isProd) {
+        return callback(null, true);
+      }
+
+      const lower = origin.toLowerCase();
+      const isAllowedDomain =
+        lower.endsWith('.skyrush.cc') ||
+        lower === 'https://skyrush.cc' ||
+        customOrigins.includes(lower);
+
+      if (isAllowedDomain) {
+        callback(null, true);
+      } else {
+        callback(new Error(`WebSocket Origin ${origin} not permitted by SkyRush CORS policy`));
+      }
+    },
+    credentials: true,
+  },
+})
 export class GameGateway implements OnGatewayInit, OnGatewayConnection {
   private readonly logger = new Logger(GameGateway.name);
 

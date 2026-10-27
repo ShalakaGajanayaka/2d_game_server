@@ -9,9 +9,28 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   // Apply Helmet Security Headers (Defense-in-Depth against XSS, clickjacking, fingerprinting)
+  const isProdEnv = process.env.NODE_ENV === 'production';
   app.use(
     helmet({
-      contentSecurityPolicy: false,
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+          styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+          fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+          imgSrc: ["'self'", 'data:', 'https:', 'blob:'],
+          connectSrc: [
+            "'self'",
+            'https://skyrush.cc',
+            'https://*.skyrush.cc',
+            'https://engine.skyrush.cc',
+            'wss://engine.skyrush.cc',
+            ...(isProdEnv ? [] : ['http://localhost:*', 'ws://localhost:*', 'ws://127.0.0.1:*']),
+          ],
+          frameAncestors: ["'self'"],
+          objectSrc: ["'none'"],
+        },
+      },
       crossOriginEmbedderPolicy: false,
     }),
   );
