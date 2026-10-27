@@ -222,39 +222,50 @@ export class AdminService implements OnModuleInit {
   }
 
   async getDashboardStats() {
-    const totalUsers = await this.userRepo.count();
-    const allUsers = await this.userRepo.find();
+    const [
+      totalUsers,
+      balanceRaw,
+      pendingDeposits,
+      depositStatsRaw,
+      pendingWithdrawals,
+      withdrawalStatsRaw,
+    ] = await Promise.all([
+      this.userRepo.count(),
+      this.userRepo
+        .createQueryBuilder('u')
+        .select(`COALESCE(SUM(CASE WHEN u."isMarketing" = false THEN u.balance ELSE 0 END), 0)`, 'totalSystemBalance')
+        .addSelect(`COALESCE(SUM(CASE WHEN u."isMarketing" = true THEN u.balance ELSE 0 END), 0)`, 'marketingSystemBalance')
+        .getRawOne(),
+      this.depositRepo.count({ where: { status: DepositStatus.PENDING } }),
+      this.depositRepo
+        .createQueryBuilder('d')
+        .leftJoin(User, 'u', 'u.id = d."userId"')
+        .where('d.status = :status', { status: DepositStatus.APPROVED })
+        .andWhere('(u."isMarketing" IS NULL OR u."isMarketing" = false)')
+        .select('COUNT(d.id)', 'approvedDeposits')
+        .addSelect('COALESCE(SUM(d.amount), 0)', 'totalDepositedAmount')
+        .getRawOne(),
+      this.withdrawalRepo.count({ where: { status: WithdrawalStatus.PENDING } }),
+      this.withdrawalRepo
+        .createQueryBuilder('w')
+        .leftJoin(User, 'u', 'u.id = w."userId"')
+        .where('w.status = :status', { status: WithdrawalStatus.PAID })
+        .andWhere('w."isMarketing" = false')
+        .andWhere('(u."isMarketing" IS NULL OR u."isMarketing" = false)')
+        .select('COUNT(w.id)', 'paidWithdrawals')
+        .addSelect('COALESCE(SUM(w.amount), 0)', 'totalWithdrawnAmount')
+        .getRawOne(),
+    ]);
 
-    // Identify marketing promotional user IDs to isolate promotional balances and demo credits
-    const marketingUserIds = new Set(allUsers.filter((u) => u.isMarketing).map((u) => u.id));
-    const realUsers = allUsers.filter((u) => !u.isMarketing);
+    const approvedDeposits = parseInt(depositStatsRaw?.approvedDeposits || '0', 10);
+    const totalDepositedAmount = parseFloat(Number(depositStatsRaw?.totalDepositedAmount || 0).toFixed(2));
 
-    const pendingDeposits = await this.depositRepo.count({ where: { status: DepositStatus.PENDING } });
+    const paidWithdrawals = parseInt(withdrawalStatsRaw?.paidWithdrawals || '0', 10);
+    const totalWithdrawnAmount = parseFloat(Number(withdrawalStatsRaw?.totalWithdrawnAmount || 0).toFixed(2));
 
-    // Only real non-marketing customer deposits contribute to Real Deposited Volume (Normalized to USD)
-    const approvedList = await this.depositRepo.find({ where: { status: DepositStatus.APPROVED } });
-    const realApprovedList = approvedList.filter((d) => !marketingUserIds.has(d.userId));
-    const approvedDeposits = realApprovedList.length;
-    const totalDepositedAmount = parseFloat(
-      realApprovedList.reduce((sum, d) => sum + Number(d.amount), 0).toFixed(2),
-    );
+    const totalSystemBalance = parseFloat(Number(balanceRaw?.totalSystemBalance || 0).toFixed(2));
+    const marketingSystemBalance = parseFloat(Number(balanceRaw?.marketingSystemBalance || 0).toFixed(2));
 
-    const pendingWithdrawals = await this.withdrawalRepo.count({ where: { status: WithdrawalStatus.PENDING } });
-    const paidWithdrawalList = await this.withdrawalRepo.find({ where: { status: WithdrawalStatus.PAID } });
-    const realPaidWithdrawals = paidWithdrawalList.filter((w) => !marketingUserIds.has(w.userId) && !w.isMarketing);
-    const paidWithdrawals = realPaidWithdrawals.length;
-    const totalWithdrawnAmount = parseFloat(
-      realPaidWithdrawals.reduce((sum, w) => sum + Number(w.amount), 0).toFixed(2),
-    );
-
-    // Only real customer wallets count toward real active system liability (already in USD)
-    const totalSystemBalance = parseFloat(
-      realUsers.reduce((sum, u) => sum + Number(u.balance), 0).toFixed(2),
-    );
-    const marketingSystemBalance = parseFloat(
-      allUsers.filter((u) => u.isMarketing).reduce((sum, u) => sum + Number(u.balance), 0).toFixed(2),
-    );
-    
     const globalPool = this.gameService.getGlobalPool();
     const pendingGlobalPool = this.gameService.getPendingGlobalPool();
 

@@ -15,6 +15,7 @@ export enum WithdrawalStatus {
 }
 
 @Entity('withdrawal_requests')
+@Index(['status', 'createdAt'])
 export class WithdrawalRequest {
   @PrimaryGeneratedColumn('uuid')
   id: string;

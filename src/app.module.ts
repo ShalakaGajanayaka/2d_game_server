@@ -56,6 +56,12 @@ import { PoolAuditLog } from './auth/entities/pool-audit-log.entity';
           database: config.get<string>('DB_NAME', 'skyrush_db'),
           entities: [User, Transaction, DepositRequest, WithdrawalRequest, BetHistory, PoolAuditLog],
           synchronize: !isProd, // Auto-create tables in non-production, disable schema alteration in prod
+          extra: {
+            max: parseInt(config.get<string>('DB_POOL_MAX', '50'), 10),
+            min: parseInt(config.get<string>('DB_POOL_MIN', '10'), 10),
+            idleTimeoutMillis: 30000,
+            connectionTimeoutMillis: 5000,
+          },
         };
       },
     }),

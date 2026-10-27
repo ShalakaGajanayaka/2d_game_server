@@ -127,6 +127,10 @@ sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = 'skyrush_db
 # Apply self-healing database constraints & indexes (idempotent)
 sudo -u postgres psql -d skyrush_db -c 'CREATE UNIQUE INDEX IF NOT EXISTS idx_deposit_ref_unique ON deposit_requests ("referenceNumber");' 2>/dev/null || true
 sudo -u postgres psql -d skyrush_db -c 'DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '\''chk_user_balance_non_negative'\'') THEN ALTER TABLE users ADD CONSTRAINT chk_user_balance_non_negative CHECK (balance >= 0); END IF; END $$;' 2>/dev/null || true
+sudo -u postgres psql -d skyrush_db -c 'CREATE INDEX IF NOT EXISTS idx_transactions_user_created ON transactions ("userId", "createdAt" DESC);' 2>/dev/null || true
+sudo -u postgres psql -d skyrush_db -c 'CREATE INDEX IF NOT EXISTS idx_bet_history_user_created ON bet_history ("userId", "createdAt" DESC);' 2>/dev/null || true
+sudo -u postgres psql -d skyrush_db -c 'CREATE INDEX IF NOT EXISTS idx_deposit_status_created ON deposit_requests (status, "createdAt" DESC);' 2>/dev/null || true
+sudo -u postgres psql -d skyrush_db -c 'CREATE INDEX IF NOT EXISTS idx_withdrawal_status_created ON withdrawal_requests (status, "createdAt" DESC);' 2>/dev/null || true
 
 # 6. Build & Launch Backend Server
 echo "🚀 [6/8] Building and Launching NestJS Backend..."

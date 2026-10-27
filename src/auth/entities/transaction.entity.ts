@@ -1,6 +1,7 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 'typeorm';
 
 @Entity('transactions')
+@Index(['userId', 'createdAt'])
 export class Transaction {
   @PrimaryGeneratedColumn('uuid')
   id: string;

@@ -7,6 +7,7 @@ export enum DepositStatus {
 }
 
 @Entity('deposit_requests')
+@Index(['status', 'createdAt'])
 export class DepositRequest {
   @PrimaryGeneratedColumn('uuid')
   id: string;

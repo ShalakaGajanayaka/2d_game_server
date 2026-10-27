@@ -1,6 +1,7 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 'typeorm';
 
 @Entity('bet_history')
+@Index(['userId', 'createdAt'])
 export class BetHistory {
   @PrimaryGeneratedColumn('uuid')
   id: string;
