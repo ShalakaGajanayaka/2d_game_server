@@ -1337,7 +1337,7 @@ export class AdminService implements OnModuleInit {
         if (['DEPOSIT', 'MANUAL_CREDIT', 'WITHDRAWAL_REFUND', 'WITHDRAWAL_CANCEL_REFUND', 'ADMIN_CREDIT', 'BONUS'].includes(tx.type)) {
           calculatedBalanceUSD += Math.abs(normalizedAmtUSD);
           totalDeposits += Math.abs(normalizedAmtUSD);
-        } else if (['CASHOUT', 'CANCEL_BET'].includes(tx.type)) {
+        } else if (['CASHOUT', 'AUTO_CASHOUT', 'CANCEL_BET', 'CANCEL_QUEUED_BET', 'CANCEL_QUEUED_BET_MAINTENANCE'].includes(tx.type)) {
           calculatedBalanceUSD += Math.abs(normalizedAmtUSD);
           totalWins += Math.abs(normalizedAmtUSD);
         } else if (['BET', 'BET_QUEUED'].includes(tx.type)) {
