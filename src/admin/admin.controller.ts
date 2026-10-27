@@ -254,7 +254,8 @@ export class AdminController {
       await this.redisService.del(attemptsKey);
 
       const token = crypto.randomBytes(32).toString('hex');
-      await this.redisService.set(`admin_token:${token}`, 'admin', 86400); // 24 hours
+      // SECURITY: Bind exact authenticated operator identity to session token
+      await this.redisService.set(`admin_token:${token}`, targetUser, 86400); // 24 hours
       return { token };
     }
 
@@ -304,18 +305,22 @@ export class AdminController {
   @UseGuards(AdminAuthGuard)
   @Post('api/pool/adjust')
   async adjustPool(
+    @Req() req: any,
     @Body()
     body: {
       action: 'TOP_UP' | 'PROFIT_SKIM' | 'SET_TARGET';
       amount: number;
       note?: string;
-      adminUser?: string;
     },
   ) {
     if (!body.action || typeof body.amount !== 'number' || isNaN(body.amount) || body.amount <= 0) {
       throw new BadRequestException('Action and a positive amount are required');
     }
-    return this.adminService.adjustPool(body);
+    const verifiedAdmin = req.adminUser || 'Admin';
+    return this.adminService.adjustPool({
+      ...body,
+      adminUser: verifiedAdmin,
+    });
   }
 
   @UseGuards(AdminAuthGuard)
@@ -375,55 +380,63 @@ export class AdminController {
   @UseGuards(AdminAuthGuard)
   @Post('api/withdrawals/:id/approve')
   async approveWithdrawal(
+    @Req() req: any,
     @Param('id') id: string,
-    @Body() body: { adminNote?: string; adminUser?: string },
+    @Body() body: { adminNote?: string },
   ) {
-    return this.adminService.approveWithdrawal(id, body?.adminNote, body?.adminUser || 'Admin');
+    const verifiedAdmin = req.adminUser || 'Admin';
+    return this.adminService.approveWithdrawal(id, body?.adminNote, verifiedAdmin);
   }
 
   @UseGuards(AdminAuthGuard)
   @Post('api/withdrawals/:id/reject')
   async rejectWithdrawal(
+    @Req() req: any,
     @Param('id') id: string,
-    @Body() body: { reason?: string; adminUser?: string },
+    @Body() body: { reason?: string },
   ) {
-    return this.adminService.rejectWithdrawal(id, body?.reason, body?.adminUser || 'Admin');
+    const verifiedAdmin = req.adminUser || 'Admin';
+    return this.adminService.rejectWithdrawal(id, body?.reason, verifiedAdmin);
   }
 
   @UseGuards(AdminAuthGuard)
   @Post('api/deposits/:id/approve')
   async approveDeposit(
+    @Req() req: any,
     @Param('id') id: string,
-    @Body() body: { adminUser?: string },
   ) {
-    return this.adminService.approveDeposit(id, body?.adminUser || 'Admin');
+    const verifiedAdmin = req.adminUser || 'Admin';
+    return this.adminService.approveDeposit(id, verifiedAdmin);
   }
 
   @UseGuards(AdminAuthGuard)
   @Post('api/deposits/:id/reject')
   async rejectDeposit(
+    @Req() req: any,
     @Param('id') id: string,
-    @Body() body: { reason?: string; adminUser?: string },
+    @Body() body: { reason?: string },
   ) {
-    return this.adminService.rejectDeposit(id, body?.reason, body?.adminUser || 'Admin');
+    const verifiedAdmin = req.adminUser || 'Admin';
+    return this.adminService.rejectDeposit(id, body?.reason, verifiedAdmin);
   }
 
   @UseGuards(AdminAuthGuard)
   @Post('api/manual-credit')
   async manualCredit(
+    @Req() req: any,
     @Body()
     body: {
       identifier: string;
       amount: number;
       note?: string;
-      adminUser?: string;
     },
   ) {
+    const verifiedAdmin = req.adminUser || 'Admin';
     return this.adminService.manualCredit(
       body.identifier,
       body.amount,
       body.note,
-      body?.adminUser || 'Admin',
+      verifiedAdmin,
     );
   }
 
@@ -462,52 +475,65 @@ export class AdminController {
   @UseGuards(AdminAuthGuard)
   @Post('api/users/:id/freeze')
   async freezeUser(
+    @Req() req: any,
     @Param('id') id: string,
-    @Body() body: { reason?: string; adminUser?: string },
+    @Body() body: { reason?: string },
   ) {
-    return this.adminService.freezeUser(id, body?.reason || 'Administrative Security Suspension', body?.adminUser || 'Admin');
+    const verifiedAdmin = req.adminUser || 'Admin';
+    return this.adminService.freezeUser(id, body?.reason || 'Administrative Security Suspension', verifiedAdmin);
   }
 
   @UseGuards(AdminAuthGuard)
   @Post('api/users/:id/unfreeze')
   async unfreezeUser(
+    @Req() req: any,
     @Param('id') id: string,
-    @Body() body: { adminUser?: string },
   ) {
-    return this.adminService.unfreezeUser(id, body?.adminUser || 'Admin');
+    const verifiedAdmin = req.adminUser || 'Admin';
+    return this.adminService.unfreezeUser(id, verifiedAdmin);
   }
 
   @UseGuards(AdminAuthGuard)
   @Post('api/users/:id/marketing')
   async updateMarketingStatus(
+    @Req() req: any,
     @Param('id') id: string,
-    @Body() body: { isMarketing: boolean; isMarketingAutoWin: boolean; adminUser?: string },
+    @Body() body: { isMarketing: boolean; isMarketingAutoWin: boolean },
   ) {
+    const verifiedAdmin = req.adminUser || 'Admin';
     return this.adminService.toggleMarketingStatus(
       id,
       !!body?.isMarketing,
       !!body?.isMarketingAutoWin,
-      body?.adminUser || 'Admin',
+      verifiedAdmin,
     );
   }
 
   @Get('api/marketing/preview')
   async getMarketingPreview(
-    @Req() req: any,
-    @Query('key') streamerKey?: string,
-    @Query('token') queryToken?: string,
+    @Headers('x-streamer-key') headerStreamerKey?: string,
+    @Headers('authorization') authHeader?: string,
   ) {
     const configuredSecret = process.env.STREAMER_RADAR_SECRET;
     let authorized = false;
 
-    if (configuredSecret && streamerKey && streamerKey.trim() === configuredSecret.trim()) {
-      authorized = true;
-    } else {
-      const authHeader = req.headers?.authorization;
-      let token = queryToken?.trim();
-      if (!token && authHeader && authHeader.startsWith('Bearer ')) {
-        token = authHeader.replace('Bearer ', '').trim();
+    // 1. Verify Streamer Key via Header (timing-safe comparison against brute-force/side-channel)
+    const streamerKey = (headerStreamerKey || '').trim();
+    if (configuredSecret && streamerKey && configuredSecret.trim().length > 0) {
+      try {
+        const bufA = Buffer.from(streamerKey);
+        const bufB = Buffer.from(configuredSecret.trim());
+        if (bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB)) {
+          authorized = true;
+        }
+      } catch {
+        authorized = false;
       }
+    }
+
+    // 2. Fallback to Admin Session via Authorization Bearer token header
+    if (!authorized && authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.replace('Bearer ', '').trim();
       if (token) {
         const isAdmin = await this.redisService.get(`admin_token:${token}`);
         if (isAdmin) authorized = true;
@@ -527,21 +553,22 @@ export class AdminController {
   @UseGuards(AdminAuthGuard)
   @Post('api/users/:id/adjust-balance')
   async adjustUserBalance(
+    @Req() req: any,
     @Param('id') id: string,
     @Body()
     body: {
       action: 'RESET_ZERO' | 'SET_AMOUNT' | 'DEDUCT';
       amount?: number;
       reason?: string;
-      adminUser?: string;
     },
   ) {
+    const verifiedAdmin = req.adminUser || 'Admin';
     return this.adminService.adjustUserBalance(
       id,
       body.action,
       body.amount,
       body.reason || 'Administrative Balance Adjustment',
-      body.adminUser || 'Admin',
+      verifiedAdmin,
     );
   }
 

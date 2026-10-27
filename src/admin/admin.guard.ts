@@ -24,6 +24,9 @@ export class AdminAuthGuard implements CanActivate {
       throw new UnauthorizedException('Invalid or expired admin token');
     }
 
+    // SECURITY HARDENING: Bind verified operator identity directly to request context
+    request.adminUser = typeof isAdmin === 'string' && isAdmin.trim().length > 0 ? isAdmin : 'Admin';
+
     return true;
   }
 }

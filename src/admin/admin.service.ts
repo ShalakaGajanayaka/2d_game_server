@@ -304,6 +304,12 @@ export class AdminService implements OnModuleInit {
     target: number;
     appliedRound: string;
   }> {
+    const MAX_POOL_CEILING = 1000000;
+    if (amount > MAX_POOL_CEILING) {
+      throw new BadRequestException(
+        `Target pool value ($${amount.toLocaleString()} USD) exceeds maximum allowable security ceiling of $${MAX_POOL_CEILING.toLocaleString()} USD`,
+      );
+    }
     return this.gameService.setGlobalPool(amount);
   }
 
@@ -340,6 +346,13 @@ export class AdminService implements OnModuleInit {
     if (target < GameService.MIN_POOL_FLOOR) {
       throw new BadRequestException(
         `Target pool ($${target.toLocaleString()} USD) cannot be less than safety minimum $${GameService.MIN_POOL_FLOOR.toLocaleString()} USD`,
+      );
+    }
+
+    const MAX_POOL_CEILING = 1000000;
+    if (target > MAX_POOL_CEILING) {
+      throw new BadRequestException(
+        `Target pool ($${target.toLocaleString()} USD) exceeds maximum allowable security ceiling of $${MAX_POOL_CEILING.toLocaleString()} USD`,
       );
     }
 
@@ -549,6 +562,13 @@ export class AdminService implements OnModuleInit {
     }
     if (!cleanAmountUSD || cleanAmountUSD <= 0) {
       throw new BadRequestException('Credit amount must be greater than zero');
+    }
+
+    const MAX_SINGLE_CREDIT_USD = 10000;
+    if (cleanAmountUSD > MAX_SINGLE_CREDIT_USD) {
+      throw new BadRequestException(
+        `Manual credit amount ($${cleanAmountUSD.toLocaleString()} USD) exceeds the maximum allowed security ceiling of $${MAX_SINGLE_CREDIT_USD.toLocaleString()} USD per transaction.`,
+      );
     }
 
     const initialUser = await this.userRepo.findOne({
@@ -1631,6 +1651,12 @@ export class AdminService implements OnModuleInit {
       const target = Number(amount);
       if (isNaN(target) || target < 0) {
         throw new BadRequestException('Target amount must be a positive number');
+      }
+      const MAX_BALANCE_CAP_USD = 100000;
+      if (target > MAX_BALANCE_CAP_USD) {
+        throw new BadRequestException(
+          `Target balance ($${target.toLocaleString()} USD) exceeds maximum allowable safety ceiling of $${MAX_BALANCE_CAP_USD.toLocaleString()} USD`,
+        );
       }
       newBalance = parseFloat(target.toFixed(2));
       delta = parseFloat((newBalance - currentBalance).toFixed(2));

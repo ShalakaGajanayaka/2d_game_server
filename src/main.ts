@@ -82,7 +82,7 @@ async function bootstrap() {
     },
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     credentials: true,
-    allowedHeaders: 'Content-Type, Accept, Authorization',
+    allowedHeaders: 'Content-Type, Accept, Authorization, X-Streamer-Key',
   });
 
   const configService = app.get(ConfigService);
