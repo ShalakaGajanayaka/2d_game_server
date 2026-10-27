@@ -72,6 +72,14 @@ export class AdminService implements OnModuleInit {
     return this.gameService.getMaintenanceStatus();
   }
 
+  async broadcastSystemAnnouncement(payload: { title?: string; message: string; type?: string }) {
+    if (!payload.message || !payload.message.trim()) {
+      throw new BadRequestException('Announcement message cannot be empty');
+    }
+    this.logger.warn(`Admin broadcasting announcement to all players: ${payload.message}`);
+    return this.gameService.broadcastAnnouncement(payload);
+  }
+
   getPaymentChannels(): PaymentChannel[] {
     return [
       {

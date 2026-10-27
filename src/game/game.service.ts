@@ -252,6 +252,18 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  public broadcastAnnouncement(payload: { title?: string; message: string; type?: string }) {
+    if (this.server) {
+      this.server.emit('systemAnnouncement', {
+        type: payload.type || 'info',
+        title: payload.title || 'System Announcement',
+        message: payload.message,
+        timestamp: Date.now(),
+      });
+    }
+    return { success: true, timestamp: Date.now() };
+  }
+
   public async scheduleMaintenance(minutes: number = 15, message?: string) {
     this.isMaintenanceScheduled = true;
     this.isMaintenanceActive = false;

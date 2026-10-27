@@ -353,6 +353,14 @@ export class AdminController {
   }
 
   @UseGuards(AdminAuthGuard)
+  @Post('api/system/broadcast')
+  async broadcastAnnouncement(
+    @Body() body: { title?: string; message: string; type?: string },
+  ) {
+    return this.adminService.broadcastSystemAnnouncement(body);
+  }
+
+  @UseGuards(AdminAuthGuard)
   @Get('api/deposits')
   async getDeposits(
     @Query('status') status?: string,
