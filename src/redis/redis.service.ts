@@ -50,6 +50,10 @@ export class RedisService implements OnModuleDestroy {
     return this.redisClient.smembers(key);
   }
 
+  async ping(): Promise<string> {
+    return this.redisClient.ping();
+  }
+
   async mget(keys: string[]): Promise<(string | null)[]> {
     if (!keys || keys.length === 0) return [];
     return this.redisClient.mget(...keys);
