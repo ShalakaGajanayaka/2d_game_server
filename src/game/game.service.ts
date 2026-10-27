@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy, BadRequestException } from '@nestjs/common';
 import { Server } from 'socket.io';
 import * as crypto from 'crypto';
 import { RedisService } from '../redis/redis.service';
@@ -91,6 +91,7 @@ export class GameRoomState {
   currentServerSeed: string = '';
   currentServerSeedHash: string = '';
   currentClientSeed: string = '0000000000000000000413e4592f3d37fa6104b0e32e31575e03b0c8b95da420';
+  pendingNextClientSeed: string | null = null;
   previousRound: {
     roundNumber: number;
     serverSeed: string;
@@ -750,6 +751,14 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
 
     // Advance Provably Fair round commitment
     room.roundNumber++;
+
+    // Rotate client seed dynamically if a pending seed was submitted
+    if (room.pendingNextClientSeed) {
+      room.currentClientSeed = room.pendingNextClientSeed;
+      room.pendingNextClientSeed = null;
+      this.logger.log(`[Room: ${roomType}] Dynamically rotated Provably Fair client seed to: ${room.currentClientSeed}`);
+    }
+
     room.currentServerSeed = crypto.randomBytes(32).toString('hex');
     room.currentServerSeedHash = crypto.createHash('sha256').update(room.currentServerSeed).digest('hex');
 
@@ -1069,9 +1078,24 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
         roundNumber: room.roundNumber,
         serverSeedHash: room.currentServerSeedHash,
         clientSeed: room.currentClientSeed,
+        pendingNextClientSeed: room.pendingNextClientSeed || null,
         serverSeed: room.status === GameStatus.CRASHED ? room.currentServerSeed : 'HIDDEN_UNTIL_ROUND_ENDS',
       },
       previousRound: room.previousRound,
+    };
+  }
+
+  public setNextClientSeed(newClientSeed: string, roomType: GameRoomType = GameRoomType.STANDARD) {
+    const clean = (newClientSeed || '').trim();
+    if (!clean || clean.length < 8 || clean.length > 128) {
+      throw new BadRequestException('Client seed must be between 8 and 128 characters.');
+    }
+    const room = this.getRoom(roomType);
+    room.pendingNextClientSeed = clean;
+    return {
+      success: true,
+      message: `Next round client seed updated to: ${clean}. It will take effect when the next round starts.`,
+      activeNextClientSeed: clean,
     };
   }
 

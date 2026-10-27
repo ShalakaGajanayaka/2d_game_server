@@ -120,7 +120,8 @@ if [ -z "$ACTIVE_DB_PASS" ]; then
     exit 1
 fi
 
-sudo -u postgres psql -c "ALTER USER postgres PASSWORD '$ACTIVE_DB_PASS';"
+# Safely parameterize password to prevent shell expansion & SQL injection
+sudo -u postgres psql -v dbpass="$ACTIVE_DB_PASS" -c "ALTER USER postgres PASSWORD :'dbpass';"
 sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = 'skyrush_db'" | grep -q 1 || sudo -u postgres psql -c "CREATE DATABASE skyrush_db;"
 
 # Apply self-healing database constraints & indexes (idempotent)

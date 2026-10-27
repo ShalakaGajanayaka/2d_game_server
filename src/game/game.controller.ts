@@ -1,4 +1,4 @@
-import { Controller, Get, Query, Param, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Post, Body, Query, Param, BadRequestException } from '@nestjs/common';
 import { GameService } from './game.service';
 import * as crypto from 'crypto';
 
@@ -12,6 +12,14 @@ export class GameController {
       success: true,
       data: this.gameService.getProvablyFairRound(),
     };
+  }
+
+  @Post('client-seed')
+  setClientSeed(@Body() body: { clientSeed?: string }) {
+    if (!body?.clientSeed) {
+      throw new BadRequestException('Property "clientSeed" is required in request body.');
+    }
+    return this.gameService.setNextClientSeed(body.clientSeed);
   }
 
   @Get('verify')
