@@ -247,7 +247,7 @@ export class AdminService implements OnModuleInit {
       this.depositRepo.count({ where: { status: DepositStatus.PENDING } }),
       this.depositRepo
         .createQueryBuilder('d')
-        .leftJoin(User, 'u', 'u.id = d."userId"')
+        .leftJoin(User, 'u', 'CAST(u.id AS VARCHAR) = d."userId"')
         .where('d.status = :status', { status: DepositStatus.APPROVED })
         .andWhere('(u."isMarketing" IS NULL OR u."isMarketing" = false)')
         .select('COUNT(d.id)', 'approvedDeposits')
@@ -256,7 +256,7 @@ export class AdminService implements OnModuleInit {
       this.withdrawalRepo.count({ where: { status: WithdrawalStatus.PENDING } }),
       this.withdrawalRepo
         .createQueryBuilder('w')
-        .leftJoin(User, 'u', 'u.id = w."userId"')
+        .leftJoin(User, 'u', 'CAST(u.id AS VARCHAR) = w."userId"')
         .where('w.status = :status', { status: WithdrawalStatus.PAID })
         .andWhere('w."isMarketing" = false')
         .andWhere('(u."isMarketing" IS NULL OR u."isMarketing" = false)')
