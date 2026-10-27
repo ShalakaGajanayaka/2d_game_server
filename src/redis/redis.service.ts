@@ -50,14 +50,44 @@ export class RedisService implements OnModuleDestroy {
     return this.redisClient.smembers(key);
   }
 
+  async mget(keys: string[]): Promise<(string | null)[]> {
+    if (!keys || keys.length === 0) return [];
+    return this.redisClient.mget(...keys);
+  }
+
+  async delMultiple(keys: string[]): Promise<number> {
+    if (!keys || keys.length === 0) return 0;
+    return this.redisClient.del(...keys);
+  }
+
   async acquireLock(key: string, ttlSeconds: number = 3): Promise<boolean> {
     const result = await this.redisClient.set(key, 'locked', 'EX', ttlSeconds, 'NX');
     return result === 'OK';
   }
 
-  async releaseLock(key: string): Promise<void> {
+  async acquireTokenLock(key: string, ttlSeconds: number = 3): Promise<string | null> {
+    const token = `${Date.now()}_${Math.random().toString(36).substring(2, 12)}`;
+    const result = await this.redisClient.set(key, token, 'EX', ttlSeconds, 'NX');
+    return result === 'OK' ? token : null;
+  }
+
+  async releaseLock(key: string, token?: string): Promise<void> {
     try {
-      await this.redisClient.del(key);
-    } catch {}
+      if (token) {
+        // Atomic compare-and-delete Lua script prevents deleting another worker's acquired lock
+        const luaScript = `
+          if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("del", KEYS[1])
+          else
+            return 0
+          end
+        `;
+        await this.redisClient.eval(luaScript, 1, key, token);
+      } else {
+        await this.redisClient.del(key);
+      }
+    } catch (err) {
+      this.logger.error(`Error releasing lock for key: ${key}`, err);
+    }
   }
 }

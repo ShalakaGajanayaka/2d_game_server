@@ -660,8 +660,8 @@ export class AuthService implements OnModuleInit {
 
     // Phase 2: Distributed Atomic Mutex Lock
     const lockKey = `lock:bet:${user.id}:${betIndex}`;
-    const acquired = await this.redisService.acquireLock(lockKey, 3);
-    if (!acquired) {
+    const lockToken = await this.redisService.acquireTokenLock(lockKey, 5);
+    if (!lockToken) {
       throw new ConflictException('A bet operation is already being processed for this slot');
     }
 
@@ -792,7 +792,7 @@ export class AuthService implements OnModuleInit {
         user: sanitized,
       };
     } finally {
-      await this.redisService.releaseLock(lockKey);
+      await this.redisService.releaseLock(lockKey, lockToken);
     }
   }
 
@@ -807,8 +807,8 @@ export class AuthService implements OnModuleInit {
 
     // Phase 2: Distributed Atomic Mutex Lock
     const lockKey = `lock:bet:${user.id}:${betIndex}`;
-    const acquired = await this.redisService.acquireLock(lockKey, 3);
-    if (!acquired) {
+    const lockToken = await this.redisService.acquireTokenLock(lockKey, 5);
+    if (!lockToken) {
       throw new ConflictException('A bet operation is already being processed for this slot');
     }
 
@@ -829,13 +829,6 @@ export class AuthService implements OnModuleInit {
       // Active bets can only be cancelled during the countdown phase
       if (!isQueued && this.gameService.getStatus(roomType) !== GameStatus.WAITING) {
         throw new BadRequestException('Active bets can only be cancelled during the countdown phase');
-      }
-
-      await this.redisService.del(isQueued ? queuedBetKey : activeBetKey);
-      if (isQueued) {
-        await this.redisService.srem(`queued_bets_set:${roomType}`, queuedBetKey);
-      } else {
-        await this.redisService.srem(`active_bets_set:${roomType}`, activeBetKey);
       }
 
       const betRecord = JSON.parse(raw!);
@@ -866,6 +859,14 @@ export class AuthService implements OnModuleInit {
         });
       });
 
+      // ONLY delete from Redis after PostgreSQL transaction has safely committed
+      await this.redisService.del(isQueued ? queuedBetKey : activeBetKey);
+      if (isQueued) {
+        await this.redisService.srem(`queued_bets_set:${roomType}`, queuedBetKey);
+      } else {
+        await this.redisService.srem(`active_bets_set:${roomType}`, activeBetKey);
+      }
+
       // If active bet was cancelled, notify GameService
       if (!isQueued) {
         await this.gameService.cancelRealBet(refundAmountUSD, isMarketingUser, roomType);
@@ -886,7 +887,7 @@ export class AuthService implements OnModuleInit {
         user: sanitized,
       };
     } finally {
-      await this.redisService.releaseLock(lockKey);
+      await this.redisService.releaseLock(lockKey, lockToken);
     }
   }
 
@@ -905,20 +906,17 @@ export class AuthService implements OnModuleInit {
 
     // Phase 2: Distributed Atomic Mutex Lock - Prevents parallel double-cashout
     const lockKey = `lock:cashout:${user.id}:${betIndex}`;
-    const acquired = await this.redisService.acquireLock(lockKey, 3);
-    if (!acquired) {
+    const lockToken = await this.redisService.acquireTokenLock(lockKey, 5);
+    if (!lockToken) {
       throw new ConflictException('A cashout request is already being processed');
     }
 
     try {
-      // Atomic fetch and delete to guarantee single-use cashout
       const betKey = `active_bet:${user.id}:${betIndex}`;
       const raw = await this.redisService.get(betKey);
       if (!raw) {
         throw new BadRequestException('No active bet found to cash out or already cashed out');
       }
-      await this.redisService.del(betKey);
-      await this.redisService.srem(`active_bets_set:${roomType}`, betKey);
 
       const betRecord = JSON.parse(raw);
       const betAmountUSD = Number(betRecord.amountUSD || betRecord.amount || 0);
@@ -929,6 +927,8 @@ export class AuthService implements OnModuleInit {
 
       if (currentMultiplier >= crashPoint) {
         // Plane crashed before or during the cashout attempt
+        await this.redisService.del(betKey);
+        await this.redisService.srem(`active_bets_set:${roomType}`, betKey);
         try {
           await this.betHistoryRepository.save({
             userId: user.id,
@@ -994,6 +994,10 @@ export class AuthService implements OnModuleInit {
         });
       });
 
+      // ONLY after PostgreSQL transaction has safely committed, remove bet from Redis
+      await this.redisService.del(betKey);
+      await this.redisService.srem(`active_bets_set:${roomType}`, betKey);
+
       // Notify GameService liability pool & real cashout broadcast
       await this.gameService.registerRealCashout(betAmountUSD, winAmountUSD, isMarketingUser, roomType);
       this.gameService.markRealUserCashout(betRecord.id, currentMultiplier, displayWinAmount, roomType);
@@ -1014,14 +1018,14 @@ export class AuthService implements OnModuleInit {
         user: sanitized,
       };
     } finally {
-      await this.redisService.releaseLock(lockKey);
+      await this.redisService.releaseLock(lockKey, lockToken);
     }
   }
 
   async executeRealAutoCashout(userId: string, betIndex: number, targetMultiplier: number, roomType: GameRoomType) {
     const lockKey = `lock:cashout:${userId}:${betIndex}`;
-    const acquired = await this.redisService.acquireLock(lockKey, 3);
-    if (!acquired) {
+    const lockToken = await this.redisService.acquireTokenLock(lockKey, 5);
+    if (!lockToken) {
       return;
     }
 
@@ -1031,8 +1035,6 @@ export class AuthService implements OnModuleInit {
       if (!raw) {
         return;
       }
-      await this.redisService.del(betKey);
-      await this.redisService.srem(`active_bets_set:${roomType}`, betKey);
 
       const betRecord = JSON.parse(raw);
       const betAmountUSD = Number(betRecord.amountUSD || betRecord.amount || 0);
@@ -1040,6 +1042,8 @@ export class AuthService implements OnModuleInit {
 
       if (targetMultiplier > crashPoint) {
         // Plane crashed before or during auto-cashout execution: record settled lost bet
+        await this.redisService.del(betKey);
+        await this.redisService.srem(`active_bets_set:${roomType}`, betKey);
         try {
           await this.betHistoryRepository.save({
             userId,
@@ -1104,6 +1108,10 @@ export class AuthService implements OnModuleInit {
       if (!savedUser) return;
       const userObj: User = savedUser;
 
+      // ONLY delete active bet from Redis after PostgreSQL transaction has safely committed
+      await this.redisService.del(betKey);
+      await this.redisService.srem(`active_bets_set:${roomType}`, betKey);
+
       const isMarketingUser = !!userObj.isMarketing;
       await this.gameService.registerRealCashout(betAmountUSD, winAmountUSD, isMarketingUser, roomType);
       this.gameService.markRealUserCashout(betRecord.id, targetMultiplier, displayWinAmount, roomType);
@@ -1119,14 +1127,14 @@ export class AuthService implements OnModuleInit {
     } catch (err) {
       this.logger.error(`[Auto-Cashout Engine] Error executing auto-cashout for user ${userId}`, err);
     } finally {
-      await this.redisService.releaseLock(lockKey);
+      await this.redisService.releaseLock(lockKey, lockToken);
     }
   }
 
   async executeMarketingAutoCashout(userId: string, betIndex: number, currentMultiplier: number) {
     const lockKey = `lock:cashout:${userId}:${betIndex}`;
-    const acquired = await this.redisService.acquireLock(lockKey, 3);
-    if (!acquired) {
+    const lockToken = await this.redisService.acquireTokenLock(lockKey, 5);
+    if (!lockToken) {
       return;
     }
 
@@ -1136,8 +1144,6 @@ export class AuthService implements OnModuleInit {
       if (!raw) {
         return;
       }
-      await this.redisService.del(betKey);
-      await this.redisService.srem(`active_bets_set:${GameRoomType.MARKETING}`, betKey);
 
       const betRecord = JSON.parse(raw);
       const betAmountDisplay = Number(betRecord.amount);
@@ -1190,6 +1196,10 @@ export class AuthService implements OnModuleInit {
 
       if (!savedUser) return;
 
+      // ONLY delete active bet from Redis after PostgreSQL transaction has safely committed
+      await this.redisService.del(betKey);
+      await this.redisService.srem(`active_bets_set:${GameRoomType.MARKETING}`, betKey);
+
       const userObj: User = savedUser;
       await this.gameService.registerRealCashout(betAmountUSD, winAmountUSD, true, GameRoomType.MARKETING);
       this.gameService.markRealUserCashout(betRecord.id, currentMultiplier, displayWinAmount, GameRoomType.MARKETING);
@@ -1206,7 +1216,7 @@ export class AuthService implements OnModuleInit {
     } catch (err) {
       this.logger.error(`[Marketing Auto-Win] Error executing auto cashout for user ${userId}`, err);
     } finally {
-      await this.redisService.releaseLock(lockKey);
+      await this.redisService.releaseLock(lockKey, lockToken);
     }
   }
 
@@ -1220,15 +1230,18 @@ export class AuthService implements OnModuleInit {
 
       this.logger.log(`Settling uncashed bets for [${roomType}] (${activeKeys.length} bet(s)) after crash at ${crashPoint}`);
 
-      for (const key of activeKeys) {
-        try {
-          const raw = await this.redisService.get(key);
-          if (!raw) continue;
-          await this.redisService.del(key);
+      const rawRecords = await this.redisService.mget(activeKeys);
+      const betHistoryEntries: Partial<BetHistory>[] = [];
+      const userIdsToIncrement: string[] = [];
+      const validKeysToDelete: string[] = [];
 
+      for (let i = 0; i < activeKeys.length; i++) {
+        const raw = rawRecords[i];
+        if (!raw) continue;
+        try {
           const betRecord = JSON.parse(raw);
           const betAmountUSD = Number(betRecord.amountUSD || betRecord.amount || 0);
-          await this.betHistoryRepository.save({
+          betHistoryEntries.push({
             userId: betRecord.userId,
             betAmount: betAmountUSD,
             cashOutMultiplier: null,
@@ -1236,10 +1249,37 @@ export class AuthService implements OnModuleInit {
             winAmount: 0,
             currency: 'USD',
           });
-          await this.userRepository.increment({ id: betRecord.userId }, 'gamesPlayed', 1);
-        } catch (err) {
-          this.logger.error(`Error settling active bet key ${key}`, err);
+          userIdsToIncrement.push(betRecord.userId);
+          validKeysToDelete.push(activeKeys[i]);
+        } catch (parseErr) {
+          this.logger.error(`Error parsing bet record for key ${activeKeys[i]}`, parseErr);
         }
+      }
+
+      // Execute bulk database persistence in a single batch
+      if (betHistoryEntries.length > 0) {
+        await this.betHistoryRepository
+          .createQueryBuilder()
+          .insert()
+          .into(BetHistory)
+          .values(betHistoryEntries)
+          .execute();
+
+        // Bulk increment gamesPlayed for distinct users
+        const uniqueUserIds = Array.from(new Set(userIdsToIncrement));
+        if (uniqueUserIds.length > 0) {
+          await this.userRepository
+            .createQueryBuilder()
+            .update(User)
+            .set({ gamesPlayed: () => '"gamesPlayed" + 1' })
+            .where('id IN (:...ids)', { ids: uniqueUserIds })
+            .execute();
+        }
+      }
+
+      // Only delete Redis keys after PostgreSQL confirms safe persistence
+      if (validKeysToDelete.length > 0) {
+        await this.redisService.delMultiple(validKeysToDelete);
       }
     } catch (err) {
       this.logger.error(`Error settling active bets during crash cleanup for ${roomType}`, err);
