@@ -9,6 +9,7 @@ import { Observable } from 'rxjs';
 export function sanitizeValue(data: any): any {
   if (typeof data === 'string') {
     return data
+      .replace(/\0/g, '')
       .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
       .replace(/javascript\s*:/gi, '')
       .replace(/[<>]/g, '')

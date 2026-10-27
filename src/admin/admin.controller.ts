@@ -218,8 +218,8 @@ export class AdminController {
       }
     }
 
-    // Brute-force lockout protection: max 5 failed attempts per IP within 15 minutes
-    const clientIp = (req?.headers?.['cf-connecting-ip'] || req?.headers?.['x-forwarded-for'] || req?.ip || 'default_ip').toString().split(',')[0].trim();
+    // Brute-force lockout protection: max 5 failed attempts per IP within 15 minutes (via Express trust proxy)
+    const clientIp = (req?.ip || req?.socket?.remoteAddress || '127.0.0.1').toString().split(',')[0].trim();
     const attemptsKey = `admin_lockout:${clientIp}`;
     const attempts = await this.redisService.get(attemptsKey);
     const failedCount = attempts ? parseInt(attempts, 10) : 0;
@@ -487,10 +487,10 @@ export class AdminController {
     @Query('key') streamerKey?: string,
     @Query('token') queryToken?: string,
   ) {
-    const validStreamerKey = 'skyrush_streamer_2026';
+    const configuredSecret = process.env.STREAMER_RADAR_SECRET;
     let authorized = false;
 
-    if (streamerKey && streamerKey.trim() === validStreamerKey) {
+    if (configuredSecret && streamerKey && streamerKey.trim() === configuredSecret.trim()) {
       authorized = true;
     } else {
       const authHeader = req.headers?.authorization;
@@ -1141,6 +1141,16 @@ export class AdminController {
     let currentFilter = 'ALL';
     let userSearchTimer = null;
 
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     async function loadStats() {
       try {
         const res = await fetch('/admin/api/stats');
@@ -1191,27 +1201,39 @@ export class AdminController {
         tbody.innerHTML = deposits.map(d => \`
           <tr>
             <td>
-              <div style="font-weight: 700; color: #fff;">\${d.username}</div>
-              <div style="font-size: 12px; color: var(--text-muted);">\${d.email || d.userId}</div>
+              <div style="font-weight: 700; color: #fff;">\${escapeHtml(d.username)}</div>
+              <div style="font-size: 12px; color: var(--text-muted);">\${escapeHtml(d.email || d.userId)}</div>
             </td>
             <td>
-              <span style="font-size: 16px; font-weight: 800; color: #34d399;">\${d.currency} \${Number(d.amount).toFixed(2)}</span>
+              <span style="font-size: 16px; font-weight: 800; color: #34d399;">\${escapeHtml(d.currency)} \${Number(d.amount).toFixed(2)}</span>
             </td>
             <td>\${formatMethod(d.paymentMethod)}</td>
             <td>
-              <span class="ref-code">\${d.referenceNumber}</span>
+              <span class="ref-code">\${escapeHtml(d.referenceNumber)}</span>
             </td>
             <td style="font-size: 13px; color: var(--text-muted);">\${formatDate(d.createdAt)}</td>
             <td style="text-align: right;">
-              <button class="btn btn-success" style="padding: 6px 14px; font-size: 13px;" onclick="approveDeposit('\${d.id}', '\${d.username}', \${d.amount})">
+              <button class="btn btn-success btn-action-approve" style="padding: 6px 14px; font-size: 13px;" data-id="\${escapeHtml(d.id)}" data-username="\${escapeHtml(d.username)}" data-amount="\${Number(d.amount)}">
                 ✓ Approve
               </button>
-              <button class="btn btn-danger" style="padding: 6px 12px; font-size: 13px; margin-left: 6px;" onclick="rejectDeposit('\${d.id}')">
+              <button class="btn btn-danger btn-action-reject" style="padding: 6px 12px; font-size: 13px; margin-left: 6px;" data-id="\${escapeHtml(d.id)}">
                 ✕ Reject
               </button>
             </td>
           </tr>
         \`).join('');
+
+        tbody.querySelectorAll('.btn-action-approve').forEach(btn => {
+          btn.addEventListener('click', () => {
+            approveDeposit(btn.dataset.id, btn.dataset.username, parseFloat(btn.dataset.amount));
+          });
+        });
+
+        tbody.querySelectorAll('.btn-action-reject').forEach(btn => {
+          btn.addEventListener('click', () => {
+            rejectDeposit(btn.dataset.id);
+          });
+        });
       } catch (err) {
         console.error('Failed to load pending', err);
       }
@@ -1231,13 +1253,13 @@ export class AdminController {
 
         tbody.innerHTML = deposits.map(d => \`
           <tr>
-            <td style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted);">\${d.id.substring(0, 8)}...</td>
-            <td style="font-weight: 600;">\${d.username}</td>
-            <td style="font-weight: 700; color: #fff;">\${d.currency} \${Number(d.amount).toFixed(2)}</td>
+            <td style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted);">\${escapeHtml(d.id ? d.id.substring(0, 8) : '')}...</td>
+            <td style="font-weight: 600;">\${escapeHtml(d.username)}</td>
+            <td style="font-weight: 700; color: #fff;">\${escapeHtml(d.currency)} \${Number(d.amount).toFixed(2)}</td>
             <td>\${formatMethod(d.paymentMethod)}</td>
-            <td><span class="ref-code">\${d.referenceNumber}</span></td>
+            <td><span class="ref-code">\${escapeHtml(d.referenceNumber)}</span></td>
             <td>\${formatStatus(d.status)}</td>
-            <td style="font-size: 13px; color: var(--text-muted);">\${d.approvedBy || '-'}</td>
+            <td style="font-size: 13px; color: var(--text-muted);">\${escapeHtml(d.approvedBy || '-')}</td>
             <td style="font-size: 13px; color: var(--text-muted);">\${formatDate(d.createdAt)}</td>
           </tr>
         \`).join('');
@@ -1254,29 +1276,35 @@ export class AdminController {
         const tbody = document.getElementById('users-tbody');
 
         if (!users || users.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No players found matching "\' + search + \'".</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No players found matching "\' + escapeHtml(search) + \'".</td></tr>';
           return;
         }
 
         tbody.innerHTML = users.map(u => \`
           <tr>
-            <td style="font-weight: 700; color: #fff;">\${u.username}</td>
-            <td style="font-size: 13px; color: var(--text-muted);">\${u.email || u.phoneNumber || '-'}</td>
-            <td><span style="font-weight: 600; color: #93c5fd;">\${u.currency || 'USD'}</span></td>
+            <td style="font-weight: 700; color: #fff;">\${escapeHtml(u.username)}</td>
+            <td style="font-size: 13px; color: var(--text-muted);">\${escapeHtml(u.email || u.phoneNumber || '-')}</td>
+            <td><span style="font-weight: 600; color: #93c5fd;">\${escapeHtml(u.currency || 'USD')}</span></td>
             <td>
               <span style="font-size: 15px; font-weight: 800; color: #34d399;">
-                \${u.currency || 'USD'} \${Number(u.balance || 0).toFixed(2)}
+                \${escapeHtml(u.currency || 'USD')} \${Number(u.balance || 0).toFixed(2)}
               </span>
             </td>
-            <td>\${u.gamesPlayed || 0}</td>
+            <td>\${Number(u.gamesPlayed || 0)}</td>
             <td style="color: #fbbf24; font-weight: 600;">\${Number(u.totalWon || 0).toFixed(2)}</td>
             <td style="text-align: right;">
-              <button class="btn btn-primary" style="padding: 5px 12px; font-size: 12px;" onclick="prefillCredit('\${u.username}')">
+              <button class="btn btn-primary btn-action-credit" style="padding: 5px 12px; font-size: 12px;" data-username="\${escapeHtml(u.username)}">
                 + Quick Credit
               </button>
             </td>
           </tr>
         \`).join('');
+
+        tbody.querySelectorAll('.btn-action-credit').forEach(btn => {
+          btn.addEventListener('click', () => {
+            prefillCredit(btn.dataset.username);
+          });
+        });
       } catch (err) {
         console.error('Failed to load users', err);
       }
