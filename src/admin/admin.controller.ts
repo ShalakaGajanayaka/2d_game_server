@@ -173,20 +173,11 @@ export class AdminController {
   }
 
   @Get('my-history')
-  async getMyHistory(
-    @Headers('authorization') authHeader?: string,
-    @Query('token') queryToken?: string,
-  ) {
-    let token: string | undefined;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      token = authHeader.replace('Bearer ', '').trim();
-    } else if (queryToken) {
-      token = String(queryToken).trim();
-    }
-
-    if (!token) {
+  async getMyHistory(@Headers('authorization') authHeader?: string) {
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
       throw new UnauthorizedException('Session token required in Authorization Bearer header');
     }
+    const token = authHeader.replace('Bearer ', '').trim();
 
     let username: string | null = null;
     try {
@@ -290,6 +281,7 @@ export class AdminController {
       const token = authHeader.replace('Bearer ', '').trim();
       await this.redisService.del(`admin_token:${token}`);
     }
+    this.adminService.purgeAdminSockets();
     return { success: true, message: 'Admin session revoked successfully' };
   }
 

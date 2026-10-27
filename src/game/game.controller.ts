@@ -1,10 +1,24 @@
-import { Controller, Get, Post, Body, Query, Param, BadRequestException } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Query,
+  Param,
+  Headers,
+  BadRequestException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { GameService } from './game.service';
+import { RedisService } from '../redis/redis.service';
 import * as crypto from 'crypto';
 
 @Controller('game/provably-fair')
 export class GameController {
-  constructor(private readonly gameService: GameService) {}
+  constructor(
+    private readonly gameService: GameService,
+    private readonly redisService: RedisService,
+  ) {}
 
   @Get('current')
   getCurrentRound() {
@@ -15,10 +29,31 @@ export class GameController {
   }
 
   @Post('client-seed')
-  setClientSeed(@Body() body: { clientSeed?: string }) {
+  async setClientSeed(
+    @Headers('authorization') authHeader: string,
+    @Body() body: { clientSeed?: string },
+  ) {
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new UnauthorizedException('Authentication token required to set client seed');
+    }
+    const token = authHeader.replace('Bearer ', '').trim();
+    const username = await this.redisService.get(`token:${token}`);
+    if (!username) {
+      throw new UnauthorizedException('Invalid or expired session');
+    }
+
     if (!body?.clientSeed) {
       throw new BadRequestException('Property "clientSeed" is required in request body.');
     }
+
+    // Rate-limit seed rotation: 1 rotation per 10 seconds per authenticated user
+    const rateKey = `rate:client_seed:${username.toLowerCase()}`;
+    const isThrottled = await this.redisService.get(rateKey);
+    if (isThrottled) {
+      throw new BadRequestException('Client seed can only be rotated once every 10 seconds.');
+    }
+    await this.redisService.set(rateKey, '1', 10);
+
     return this.gameService.setNextClientSeed(body.clientSeed);
   }
 

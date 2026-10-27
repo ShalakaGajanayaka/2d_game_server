@@ -37,10 +37,16 @@ limit_req_zone $binary_remote_addr zone=skyrush_api:10m rate=30r/s;
 limit_req_zone $binary_remote_addr zone=skyrush_auth:10m rate=5r/s;
 limit_conn_zone $binary_remote_addr zone=skyrush_conn:10m;
 
+# 2.1 Global HTTP to HTTPS Redirection (Port 80 -> 301 Permanent Redirect)
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    return 301 https://$host$request_uri;
+}
+
 # 3. Frontend Web Game (skyrush.cc & www.skyrush.cc)
 server {
-    listen 80;
-    listen [::]:80;
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
     server_name skyrush.cc www.skyrush.cc;
@@ -104,8 +110,6 @@ server {
 
 # 4. Game Engine Realtime Backend (engine.skyrush.cc)
 server {
-    listen 80;
-    listen [::]:80;
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
     server_name engine.skyrush.cc;
@@ -146,8 +150,6 @@ server {
 
 # 5. Secret Admin Mission Control (hq-ops-99.skyrush.cc)
 server {
-    listen 80;
-    listen [::]:80;
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
     server_name hq-ops-99.skyrush.cc admin.skyrush.cc;

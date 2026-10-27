@@ -449,7 +449,7 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
       );
 
       if (this.server) {
-        this.server.to('room:standard').emit('globalPoolUpdated', {
+        this.server.to('admin_room').emit('globalPoolUpdated', {
           globalPool: this.globalPool,
           pendingGlobalPool: this.pendingGlobalPool,
           timestamp: Date.now(),
@@ -475,7 +475,7 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Global Pool updated immediately to: ${this.globalPool}`);
 
     if (this.server) {
-      this.server.to('room:standard').emit('globalPoolUpdated', {
+      this.server.to('admin_room').emit('globalPoolUpdated', {
         globalPool: this.globalPool,
         pendingGlobalPool: null,
         timestamp: Date.now(),
@@ -749,7 +749,7 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn('Failed to persist new global pool on round start', err);
       }
       if (this.server) {
-        this.server.to('room:standard').emit('globalPoolUpdated', {
+        this.server.to('admin_room').emit('globalPoolUpdated', {
           globalPool: this.globalPool,
           pendingGlobalPool: null,
           timestamp: Date.now(),
@@ -1123,8 +1123,11 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
 
   public setNextClientSeed(newClientSeed: string, roomType: GameRoomType = GameRoomType.STANDARD) {
     const clean = (newClientSeed || '').trim();
-    if (!clean || clean.length < 8 || clean.length > 128) {
-      throw new BadRequestException('Client seed must be between 8 and 128 characters.');
+    if (!clean || clean.length < 8 || clean.length > 64) {
+      throw new BadRequestException('Client seed must be between 8 and 64 characters.');
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(clean)) {
+      throw new BadRequestException('Client seed may only contain letters, numbers, hyphens, and underscores.');
     }
     const room = this.getRoom(roomType);
     room.pendingNextClientSeed = clean;
@@ -1305,6 +1308,17 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
       const preview = this.getMarketingPreview();
       this.server.to('admin_room').emit('marketingPreviewUpdate', preview);
       this.server.to('streamer_radar_room').emit('marketingPreviewUpdate', preview);
+    }
+  }
+
+  public purgeAdminSockets() {
+    if (this.server) {
+      try {
+        this.server.in('admin_room').socketsLeave('admin_room');
+        this.logger.log('Security: Evicted all active sockets from [admin_room]');
+      } catch (err: any) {
+        this.logger.warn(`Failed to evict sockets from admin_room: ${err?.message}`);
+      }
     }
   }
 }

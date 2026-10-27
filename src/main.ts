@@ -15,7 +15,7 @@ async function bootstrap() {
       contentSecurityPolicy: {
         directives: {
           defaultSrc: ["'self'"],
-          scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+          scriptSrc: isProdEnv ? ["'self'"] : ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
           styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
           fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
           imgSrc: ["'self'", 'data:', 'https:', 'blob:'],
@@ -58,6 +58,8 @@ async function bootstrap() {
     .map((o) => o.trim().toLowerCase())
     .filter(Boolean);
 
+  const SKYRUSH_ORIGIN_REGEX = /^https:\/\/([a-z0-9-]+\.)?skyrush\.cc$/i;
+
   app.enableCors({
     origin: (origin, callback) => {
       // Allow non-browser requests (mobile apps, curl, server-to-server)
@@ -69,8 +71,7 @@ async function bootstrap() {
 
       const lower = origin.toLowerCase();
       const isAllowedDomain =
-        lower.endsWith('.skyrush.cc') ||
-        lower === 'https://skyrush.cc' ||
+        SKYRUSH_ORIGIN_REGEX.test(lower) ||
         customOrigins.includes(lower);
 
       if (isAllowedDomain) {

@@ -109,9 +109,9 @@ export class RenameUserDto {
   @IsNotEmpty({ message: 'New username is required' })
   @IsString()
   @MinLength(3, { message: 'Username must be at least 3 characters long' })
-  @MaxLength(30, { message: 'Username must not exceed 30 characters' })
-  @Matches(/^[a-zA-Z0-9_-]+$/, {
-    message: 'Username may only contain letters, numbers, underscores, and hyphens',
+  @MaxLength(16, { message: 'Username must not exceed 16 characters' })
+  @Matches(/^[a-zA-Z0-9_]+$/, {
+    message: 'Username may only contain letters, numbers, and underscores',
   })
   newUsername: string;
 }

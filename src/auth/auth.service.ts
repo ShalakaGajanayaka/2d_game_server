@@ -577,7 +577,22 @@ export class AuthService implements OnModuleInit {
       throw new UnauthorizedException('Invalid or expired session');
     }
 
-    const existingUser = await this.userRepository.findOne({ where: { username: ILike(newUsername) } });
+    const clean = (newUsername || '').trim();
+    if (!clean || clean.length < 3 || clean.length > 16) {
+      throw new BadRequestException('Username must be between 3 and 16 characters long');
+    }
+
+    if (!/^[a-zA-Z0-9_]+$/.test(clean)) {
+      throw new BadRequestException('Username may only contain letters, numbers, and underscores');
+    }
+
+    const RESERVED_WORDS = ['admin', 'skyrush', 'support', 'moderator', 'system', 'official', 'staff', 'bot'];
+    const isReserved = RESERVED_WORDS.some((word) => clean.toLowerCase().includes(word));
+    if (isReserved) {
+      throw new BadRequestException('This username contains reserved words and cannot be selected.');
+    }
+
+    const existingUser = await this.userRepository.findOne({ where: { username: ILike(clean) } });
     if (existingUser) {
       throw new BadRequestException('Username is already taken');
     }
@@ -586,13 +601,16 @@ export class AuthService implements OnModuleInit {
     if (!user) {
       throw new UnauthorizedException('User not found');
     }
+    if (user.isFrozen) {
+      throw new UnauthorizedException(`Account is suspended: ${user.freezeReason || 'Under review'}`);
+    }
 
-    user.username = newUsername;
+    user.username = clean;
     const savedUser = await this.userRepository.save(user);
 
     try {
-      await this.redisService.set(`token:${token}`, newUsername);
-      await this.redisService.set(`user:${newUsername.toLowerCase()}`, JSON.stringify(this.sanitizeUser(savedUser)));
+      await this.redisService.set(`token:${token}`, clean);
+      await this.redisService.set(`user:${clean.toLowerCase()}`, JSON.stringify(this.sanitizeUser(savedUser)));
       await this.redisService.del(`user:${oldUsername.toLowerCase()}`);
     } catch (err) {
       this.logger.warn('Failed to update redis on rename', err);

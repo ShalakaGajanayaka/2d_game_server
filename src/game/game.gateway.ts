@@ -6,6 +6,7 @@ import { forwardRef, Inject, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike } from 'typeorm';
 import { User } from '../auth/entities/user.entity';
+import * as crypto from 'crypto';
 
 const isProd = process.env.NODE_ENV === 'production';
 const customOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
@@ -24,9 +25,9 @@ const customOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
       }
 
       const lower = origin.toLowerCase();
+      const SKYRUSH_ORIGIN_REGEX = /^https:\/\/([a-z0-9-]+\.)?skyrush\.cc$/i;
       const isAllowedDomain =
-        lower.endsWith('.skyrush.cc') ||
-        lower === 'https://skyrush.cc' ||
+        SKYRUSH_ORIGIN_REGEX.test(lower) ||
         customOrigins.includes(lower);
 
       if (isAllowedDomain) {
@@ -87,6 +88,18 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
 
   @SubscribeMessage('pingSync')
   handlePingSync(client: Socket, data: { clientSendTime: number }) {
+    const now = Date.now();
+    const rate = (client as any)._pingRate || { count: 0, resetTime: now + 1000 };
+    if (now > rate.resetTime) {
+      rate.count = 0;
+      rate.resetTime = now + 1000;
+    }
+    rate.count++;
+    (client as any)._pingRate = rate;
+    if (rate.count > 12) {
+      return { error: 'Ping rate limit exceeded' };
+    }
+
     const payload = {
       clientSendTime: data?.clientSendTime || Date.now(),
       serverReceiveTime: Date.now(),
@@ -100,11 +113,24 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
     if (!data?.token || typeof data.token !== 'string') {
       return { success: false, error: 'Token required' };
     }
+
+    const now = Date.now();
+    const rate = (client as any)._subUserRate || { count: 0, resetTime: now + 5000 };
+    if (now > rate.resetTime) {
+      rate.count = 0;
+      rate.resetTime = now + 5000;
+    }
+    rate.count++;
+    (client as any)._subUserRate = rate;
+    if (rate.count > 5) {
+      return { success: false, error: 'Too many subscription attempts. Please wait.' };
+    }
+
     try {
       const cleanToken = data.token.trim();
       const username = await this.redisService.get(`token:${cleanToken}`);
       if (username) {
-        // SECURITY PATCH: Purge any previously joined private user rooms on this socket
+        // SECURITY PATCH: Purge any previously joined private user rooms, admin, or radar rooms on this socket
         // to strictly prevent multi-user cross-subscription eavesdropping attacks
         for (const room of client.rooms) {
           if (room.startsWith('user:')) {
@@ -112,6 +138,8 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
             this.logger.log(`Security: Socket [${client.id}] purged prior private room [${room}] on re-auth`);
           }
         }
+        client.leave('admin_room');
+        client.leave('streamer_radar_room');
 
         // Join username room
         const userRoom = `user:${username.toLowerCase()}`;
@@ -204,6 +232,19 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
     if (!data?.token || typeof data.token !== 'string') {
       return { success: false, error: 'Admin token required' };
     }
+
+    const now = Date.now();
+    const rate = (client as any)._subAdminRate || { count: 0, resetTime: now + 10000 };
+    if (now > rate.resetTime) {
+      rate.count = 0;
+      rate.resetTime = now + 10000;
+    }
+    rate.count++;
+    (client as any)._subAdminRate = rate;
+    if (rate.count > 3) {
+      return { success: false, error: 'Too many admin authorization attempts.' };
+    }
+
     try {
       const cleanToken = data.token.trim();
       const isAdmin = await this.redisService.get(`admin_token:${cleanToken}`);
@@ -228,11 +269,33 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
 
   @SubscribeMessage('subscribeStreamerRadar')
   async handleSubscribeStreamerRadar(client: Socket, data: { token?: string; key?: string }) {
+    const now = Date.now();
+    const rate = (client as any)._radarRate || { count: 0, resetTime: now + 10000 };
+    if (now > rate.resetTime) {
+      rate.count = 0;
+      rate.resetTime = now + 10000;
+    }
+    rate.count++;
+    (client as any)._radarRate = rate;
+    if (rate.count > 3) {
+      return { success: false, error: 'Too many radar authorization attempts.' };
+    }
+
     const configuredSecret = process.env.STREAMER_RADAR_SECRET;
     let authorized = false;
 
-    if (configuredSecret && data?.key && typeof data.key === 'string' && data.key.trim() === configuredSecret.trim()) {
-      authorized = true;
+    if (configuredSecret && data?.key && typeof data.key === 'string') {
+      const cleanKey = data.key.trim();
+      const targetSec = configuredSecret.trim();
+      try {
+        const bufA = Buffer.from(cleanKey);
+        const bufB = Buffer.from(targetSec);
+        if (bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB)) {
+          authorized = true;
+        }
+      } catch {
+        authorized = false;
+      }
     } else if (data?.token && typeof data.token === 'string') {
       const cleanToken = data.token.trim();
       const isAdmin = await this.redisService.get(`admin_token:${cleanToken}`);

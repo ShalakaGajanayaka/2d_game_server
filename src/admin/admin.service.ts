@@ -307,6 +307,10 @@ export class AdminService implements OnModuleInit {
     return this.gameService.setGlobalPool(amount);
   }
 
+  purgeAdminSockets() {
+    this.gameService.purgeAdminSockets();
+  }
+
   async adjustPool(dto: {
     action: 'TOP_UP' | 'PROFIT_SKIM' | 'SET_TARGET';
     amount: number;
