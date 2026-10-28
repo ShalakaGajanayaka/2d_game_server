@@ -760,7 +760,18 @@ export class AdminService implements OnModuleInit {
     }
 
     try {
-      if (this.gameService.hasActiveBet(username)) {
+      const active1 = await this.redisService.get(`active_bet:${userId}:1`);
+      const active2 = await this.redisService.get(`active_bet:${userId}:2`);
+      const queued1 = await this.redisService.get(`queued_bet:${userId}:1`);
+      const queued2 = await this.redisService.get(`queued_bet:${userId}:2`);
+      if (
+        active1 ||
+        active2 ||
+        queued1 ||
+        queued2 ||
+        this.gameService.hasActiveBet(userId) ||
+        this.gameService.hasActiveBet(username)
+      ) {
         throw new BadRequestException(
           'Cannot request a withdrawal while you have an active bet in flight! Please cash out or wait for the round to conclude.',
         );

@@ -58,7 +58,12 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
   }
 
   async handleConnection(client: Socket) {
-    const token = (client.handshake?.auth?.token || client.handshake?.query?.token) as string | undefined;
+    if (client.handshake?.query?.token) {
+      this.logger.warn(
+        `[Security] Socket client [${client.id}] attempted authentication via URL query string. Insecure query parameter tokens are rejected.`,
+      );
+    }
+    const token = client.handshake?.auth?.token as string | undefined;
     if (token && typeof token === 'string' && token.trim().length > 0) {
       try {
         const cleanToken = token.trim();

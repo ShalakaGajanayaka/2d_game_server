@@ -605,6 +605,17 @@ export class AuthService implements OnModuleInit {
       throw new UnauthorizedException(`Account is suspended: ${user.freezeReason || 'Under review'}`);
     }
 
+    // Security Gate: Disallow username change while player has active or queued bets in flight
+    const active1 = await this.redisService.get(`active_bet:${user.id}:1`);
+    const active2 = await this.redisService.get(`active_bet:${user.id}:2`);
+    const queued1 = await this.redisService.get(`queued_bet:${user.id}:1`);
+    const queued2 = await this.redisService.get(`queued_bet:${user.id}:2`);
+    if (active1 || active2 || queued1 || queued2 || this.gameService.hasActiveBet(user.id) || this.gameService.hasActiveBet(oldUsername)) {
+      throw new BadRequestException(
+        'Cannot change username while you have an active or queued bet in flight. Please wait for the round to conclude.',
+      );
+    }
+
     user.username = clean;
     const savedUser = await this.userRepository.save(user);
 
@@ -676,8 +687,8 @@ export class AuthService implements OnModuleInit {
 
     const betAmountUSD = cleanAmount;
 
-    // Phase 2: Distributed Atomic Mutex Lock
-    const lockKey = `lock:bet:${user.id}:${betIndex}`;
+    // Phase 2: Distributed Atomic Mutex Lock - Unified slot-level concurrency gate
+    const lockKey = `lock:bet_slot:${user.id}:${betIndex}`;
     const lockToken = await this.redisService.acquireTokenLock(lockKey, 5);
     if (!lockToken) {
       throw new ConflictException('A bet operation is already being processed for this slot');
@@ -762,6 +773,7 @@ export class AuthService implements OnModuleInit {
         await this.gameService.registerRealBet(betAmountUSD, isMarketingUser, roomType);
         this.gameService.addRealUserBet({
           id: betId,
+          userId: savedUser!.id,
           name: savedUser!.username,
           bet: cleanAmount,
           targetMultiplier: validAutoCashout || 0,
@@ -823,8 +835,8 @@ export class AuthService implements OnModuleInit {
     const isMarketingUser = !!user.isMarketing;
     const roomType = isMarketingUser ? GameRoomType.MARKETING : GameRoomType.STANDARD;
 
-    // Phase 2: Distributed Atomic Mutex Lock
-    const lockKey = `lock:bet:${user.id}:${betIndex}`;
+    // Phase 2: Distributed Atomic Mutex Lock - Unified slot-level concurrency gate
+    const lockKey = `lock:bet_slot:${user.id}:${betIndex}`;
     const lockToken = await this.redisService.acquireTokenLock(lockKey, 5);
     if (!lockToken) {
       throw new ConflictException('A bet operation is already being processed for this slot');
@@ -922,8 +934,8 @@ export class AuthService implements OnModuleInit {
       throw new BadRequestException('Cash out is only allowed while flight is active');
     }
 
-    // Phase 2: Distributed Atomic Mutex Lock - Prevents parallel double-cashout
-    const lockKey = `lock:cashout:${user.id}:${betIndex}`;
+    // Phase 2: Distributed Atomic Mutex Lock - Prevents parallel double-cashout and cancel-cashout race
+    const lockKey = `lock:bet_slot:${user.id}:${betIndex}`;
     const lockToken = await this.redisService.acquireTokenLock(lockKey, 5);
     if (!lockToken) {
       throw new ConflictException('A cashout request is already being processed');
@@ -1041,7 +1053,7 @@ export class AuthService implements OnModuleInit {
   }
 
   async executeRealAutoCashout(userId: string, betIndex: number, targetMultiplier: number, roomType: GameRoomType) {
-    const lockKey = `lock:cashout:${userId}:${betIndex}`;
+    const lockKey = `lock:bet_slot:${userId}:${betIndex}`;
     const lockToken = await this.redisService.acquireTokenLock(lockKey, 5);
     if (!lockToken) {
       return;
@@ -1057,6 +1069,9 @@ export class AuthService implements OnModuleInit {
       const betRecord = JSON.parse(raw);
       const betAmountUSD = Number(betRecord.amountUSD || betRecord.amount || 0);
       const crashPoint = this.gameService.getCrashPoint(roomType);
+
+      // Immediately detach from active_bets_set to prevent concurrent crash cleanup from treating as loss
+      await this.redisService.srem(`active_bets_set:${roomType}`, betKey);
 
       if (targetMultiplier > crashPoint) {
         // Plane crashed before or during auto-cashout execution: record settled lost bet
@@ -1150,7 +1165,7 @@ export class AuthService implements OnModuleInit {
   }
 
   async executeMarketingAutoCashout(userId: string, betIndex: number, currentMultiplier: number) {
-    const lockKey = `lock:cashout:${userId}:${betIndex}`;
+    const lockKey = `lock:bet_slot:${userId}:${betIndex}`;
     const lockToken = await this.redisService.acquireTokenLock(lockKey, 5);
     if (!lockToken) {
       return;
@@ -1259,6 +1274,28 @@ export class AuthService implements OnModuleInit {
         try {
           const betRecord = JSON.parse(raw);
           const betAmountUSD = Number(betRecord.amountUSD || betRecord.amount || 0);
+
+          // RACE PROTECTION: If this bet had an auto-cashout target that was reached/exceeded before or at the crash point,
+          // it MUST NOT be recorded as a losing bet! Trigger/allow authoritative auto-cashout execution.
+          if (
+            betRecord.autoCashout &&
+            typeof betRecord.autoCashout === 'number' &&
+            crashPoint >= betRecord.autoCashout
+          ) {
+            this.logger.log(
+              `[Crash Settlement] Bet ${betRecord.id} qualified for auto-cashout at ${betRecord.autoCashout}x (Crash: ${crashPoint}x). Triggering authoritative settlement instead of loss.`,
+            );
+            this.executeRealAutoCashout(
+              betRecord.userId,
+              betRecord.betIndex,
+              betRecord.autoCashout,
+              roomType,
+            ).catch((err) => {
+              this.logger.error(`Error executing auto-cashout recovery for bet ${betRecord.id}`, err);
+            });
+            continue;
+          }
+
           betHistoryEntries.push({
             userId: betRecord.userId,
             betAmount: betAmountUSD,
@@ -1337,6 +1374,7 @@ export class AuthService implements OnModuleInit {
           await this.gameService.registerRealBet(betRecord.amountUSD, isMarketing, roomType);
           this.gameService.addRealUserBet({
             id: betRecord.id,
+            userId: betRecord.userId,
             name: betRecord.username,
             bet: betRecord.amount,
             targetMultiplier: betRecord.autoCashout || 0,
@@ -1595,7 +1633,7 @@ export class AuthService implements OnModuleInit {
     }
   }
 
-  async requestPasswordResetOtp(identifier: string): Promise<{ success: boolean; message: string; devOtp?: string }> {
+  async requestPasswordResetOtp(identifier: string): Promise<{ success: boolean; message: string }> {
     const clean = identifier?.trim().replace(/\s+/g, '');
     if (!clean || clean.length < 3) {
       throw new BadRequestException('Please enter a valid email or mobile number');
@@ -1666,12 +1704,9 @@ export class AuthService implements OnModuleInit {
     const target = targetEmail || user.phoneNumber || user.username;
     this.logger.log(`🔑 Password reset OTP generated for ${target} (Email sent: ${emailSent})`);
 
-    const isProduction = process.env.NODE_ENV === 'production';
-
     return {
       success: true,
       message: 'If an account matches this email or mobile number, a verification code has been dispatched.',
-      ...(!isProduction && !emailSent ? { devOtp: otp } : {}),
     };
   }
 

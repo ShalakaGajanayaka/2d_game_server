@@ -20,6 +20,7 @@ export enum GameRoomType {
 
 export interface LiveBet {
   id: string;
+  userId?: string;
   name: string;
   bet: number;
   targetMultiplier: number;
@@ -586,11 +587,15 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  public hasActiveBet(username: string): boolean {
-    if (!username) return false;
-    const cleanUser = username.toLowerCase();
+  public hasActiveBet(userIdOrUsername: string): boolean {
+    if (!userIdOrUsername) return false;
+    const clean = userIdOrUsername.toLowerCase();
     for (const room of this.rooms.values()) {
-      if (room.currentRoundBets.some(b => b.name?.toLowerCase() === cleanUser && !b.cashedOut)) {
+      if (
+        room.currentRoundBets.some(
+          b => (b.userId === userIdOrUsername || b.name?.toLowerCase() === clean) && !b.cashedOut,
+        )
+      ) {
         return true;
       }
     }
