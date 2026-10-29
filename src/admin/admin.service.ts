@@ -38,6 +38,8 @@ export class AdminService implements OnModuleInit {
     private readonly withdrawalRepo: Repository<WithdrawalRequest>,
     @InjectRepository(PoolAuditLog)
     private readonly poolAuditRepo: Repository<PoolAuditLog>,
+    @InjectRepository(BetHistory)
+    private readonly betHistoryRepo: Repository<BetHistory>,
     private readonly redisService: RedisService,
     private readonly gameService: GameService,
   ) {}
@@ -734,6 +736,172 @@ export class AdminService implements OnModuleInit {
         createdAt: true,
       },
     });
+  }
+
+  /**
+   * Comprehensive Player 360° Activity & Financial Audit:
+   * Aggregates Bet History, Deposit Requests, Withdrawal Requests, and Lifetime KPIs.
+   */
+  async getPlayerDetailedHistory(
+    userId: string,
+    options: {
+      type?: 'all' | 'bets' | 'deposits' | 'withdrawals';
+      limit?: number;
+      page?: number;
+      status?: string;
+    } = {},
+  ) {
+    const user = await this.userRepo.findOne({
+      where: [{ id: userId }, { username: userId }],
+      select: {
+        id: true,
+        username: true,
+        email: true,
+        phoneNumber: true,
+        currency: true,
+        balance: true,
+        gamesPlayed: true,
+        totalWon: true,
+        isFrozen: true,
+        isMarketing: true,
+        isMarketingAutoWin: true,
+        createdAt: true,
+      },
+    });
+
+    if (!user) {
+      throw new NotFoundException(`Player with identifier "${userId}" not found`);
+    }
+
+    const limit = Math.min(Math.max(Number(options.limit) || 50, 1), 200);
+    const page = Math.max(Number(options.page) || 1, 1);
+    const skip = (page - 1) * limit;
+    const type = options.type || 'all';
+
+    // 1. Fetch Bets
+    let bets: BetHistory[] = [];
+    let totalBets = 0;
+    if (type === 'all' || type === 'bets') {
+      [bets, totalBets] = await this.betHistoryRepo.findAndCount({
+        where: { userId: user.id },
+        order: { createdAt: 'DESC' },
+        take: limit,
+        skip: type === 'bets' ? skip : 0,
+      });
+    } else {
+      totalBets = await this.betHistoryRepo.count({ where: { userId: user.id } });
+    }
+
+    // 2. Fetch Deposits
+    let deposits: DepositRequest[] = [];
+    let totalDeposits = 0;
+    const depositWhere: any = [{ userId: user.id }, { username: user.username }];
+    if (options.status && options.status !== 'ALL') {
+      depositWhere[0] = { userId: user.id, status: options.status };
+      depositWhere[1] = { username: user.username, status: options.status };
+    }
+
+    if (type === 'all' || type === 'deposits') {
+      [deposits, totalDeposits] = await this.depositRepo.findAndCount({
+        where: depositWhere,
+        order: { createdAt: 'DESC' },
+        take: limit,
+        skip: type === 'deposits' ? skip : 0,
+      });
+    } else {
+      totalDeposits = await this.depositRepo.count({ where: depositWhere });
+    }
+
+    // 3. Fetch Withdrawals
+    let withdrawals: WithdrawalRequest[] = [];
+    let totalWithdrawals = 0;
+    const withdrawWhere: any = [{ userId: user.id }, { username: user.username }];
+    if (options.status && options.status !== 'ALL') {
+      withdrawWhere[0] = { userId: user.id, status: options.status as any };
+      withdrawWhere[1] = { username: user.username, status: options.status as any };
+    }
+
+    if (type === 'all' || type === 'withdrawals') {
+      [withdrawals, totalWithdrawals] = await this.withdrawalRepo.findAndCount({
+        where: withdrawWhere,
+        order: { createdAt: 'DESC' },
+        take: limit,
+        skip: type === 'withdrawals' ? skip : 0,
+      });
+    } else {
+      totalWithdrawals = await this.withdrawalRepo.count({ where: withdrawWhere });
+    }
+
+    // 4. Aggregated Financial Totals
+    const approvedDeposits = await this.depositRepo
+      .createQueryBuilder('d')
+      .select('SUM(d.amount)', 'sum')
+      .addSelect('COUNT(d.id)', 'count')
+      .where('(d.userId = :uid OR d.username = :uname) AND d.status = :status', {
+        uid: user.id,
+        uname: user.username,
+        status: DepositStatus.APPROVED,
+      })
+      .getRawOne();
+
+    const paidWithdrawals = await this.withdrawalRepo
+      .createQueryBuilder('w')
+      .select('SUM(w.amount)', 'sum')
+      .addSelect('COUNT(w.id)', 'count')
+      .where('(w.userId = :uid OR w.username = :uname) AND w.status = :status', {
+        uid: user.id,
+        uname: user.username,
+        status: WithdrawalStatus.PAID,
+      })
+      .getRawOne();
+
+    const betAggregates = await this.betHistoryRepo
+      .createQueryBuilder('b')
+      .select('SUM(b.betAmount)', 'totalWagered')
+      .addSelect('SUM(b.winAmount)', 'totalWon')
+      .addSelect('COUNT(b.id)', 'totalCount')
+      .where('b.userId = :uid', { uid: user.id })
+      .getRawOne();
+
+    const totalDepositedAmount = parseFloat(approvedDeposits?.sum || '0');
+    const totalApprovedDepositsCount = parseInt(approvedDeposits?.count || '0', 10);
+
+    const totalWithdrawnAmount = parseFloat(paidWithdrawals?.sum || '0');
+    const totalPaidWithdrawalsCount = parseInt(paidWithdrawals?.count || '0', 10);
+
+    const totalWageredAmount = parseFloat(betAggregates?.totalWagered || '0');
+    const totalWonAmount = parseFloat(betAggregates?.totalWon || '0');
+    const totalBetsCount = parseInt(betAggregates?.totalCount || '0', 10);
+
+    const netCashFlow = parseFloat((totalDepositedAmount - totalWithdrawnAmount).toFixed(2));
+    const netGGR = parseFloat((totalWageredAmount - totalWonAmount).toFixed(2));
+
+    return {
+      success: true,
+      user,
+      summary: {
+        currentBalance: parseFloat(Number(user.balance || 0).toFixed(2)),
+        totalDepositedAmount,
+        totalApprovedDepositsCount,
+        totalWithdrawnAmount,
+        totalPaidWithdrawalsCount,
+        netCashFlow,
+        totalWageredAmount,
+        totalWonAmount,
+        netGGR,
+        totalBetsCount,
+      },
+      counts: {
+        bets: totalBets,
+        deposits: totalDeposits,
+        withdrawals: totalWithdrawals,
+      },
+      page,
+      limit,
+      bets,
+      deposits,
+      withdrawals,
+    };
   }
 
   // -------------------------------------------------------------

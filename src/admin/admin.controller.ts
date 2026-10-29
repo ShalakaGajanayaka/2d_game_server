@@ -477,6 +477,23 @@ export class AdminController {
     return this.adminService.getUsers(search, numLimit);
   }
 
+  @UseGuards(AdminAuthGuard)
+  @Get('api/users/:id/history')
+  async getPlayerHistory(
+    @Param('id') id: string,
+    @Query('type') type?: 'all' | 'bets' | 'deposits' | 'withdrawals',
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('status') status?: string,
+  ) {
+    return this.adminService.getPlayerDetailedHistory(id, {
+      type,
+      page: page ? parseInt(page, 10) : 1,
+      limit: limit ? parseInt(limit, 10) : 50,
+      status,
+    });
+  }
+
   // -------------------------------------------------------------
   // PHASE 4: RECONCILIATION & FRAUD AUDIT ENDPOINTS
   // -------------------------------------------------------------
