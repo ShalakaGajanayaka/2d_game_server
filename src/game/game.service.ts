@@ -985,7 +985,11 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
         }
       }
 
-      if (room.currentMultiplier >= room.crashPoint) {
+      // End round if target crash point is reached or hard timeout safeguard (120s max duration) triggers
+      if (room.currentMultiplier >= room.crashPoint || elapsedSeconds >= 120.0) {
+        if (elapsedSeconds >= 120.0 && room.currentMultiplier < room.crashPoint) {
+          this.logger.warn(`[Room: ${roomType}] Hard flight duration safeguard triggered (120s max). Forcing crash.`);
+        }
         this.crash(roomType);
       }
     }, 50);
@@ -1109,7 +1113,8 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
 
     const rawMultiplier = (100 * e - h) / (e - h) / 100;
     const crashPoint = Math.floor(rawMultiplier * 100) / 100;
-    return Math.max(1.01, crashPoint);
+    // Industry Standard: Clamp multiplier between 1.01x minimum and 10,000.00x maximum
+    return Math.min(10000.00, Math.max(1.01, crashPoint));
   }
 
   public getProvablyFairRound(roomType: GameRoomType = GameRoomType.STANDARD) {
