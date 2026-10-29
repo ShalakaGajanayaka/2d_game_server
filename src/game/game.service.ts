@@ -626,7 +626,14 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  public notifyAutoCashoutSuccess(username: string, betIndex: number, multiplier: number, winAmount: number, balance: number) {
+  public notifyAutoCashoutSuccess(
+    username: string,
+    betIndex: number,
+    multiplier: number,
+    winAmount: number,
+    balance: number,
+    userId?: string,
+  ) {
     if (this.server) {
       const payload = {
         username,
@@ -637,6 +644,9 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
         timestamp: Date.now(),
       };
       this.server.to(`user:${username.toLowerCase()}`).emit('autoCashoutSuccess', payload);
+      if (userId) {
+        this.server.to(`user:${userId}`).emit('autoCashoutSuccess', payload);
+      }
     }
   }
 
@@ -1142,11 +1152,20 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException('Client seed may only contain letters, numbers, hyphens, and underscores.');
     }
     const room = this.getRoom(roomType);
-    room.pendingNextClientSeed = clean;
+    if (room.pendingNextClientSeed) {
+      // Cryptographically chain seeds when multiple players contribute entropy for the upcoming flight
+      room.pendingNextClientSeed = crypto
+        .createHash('sha256')
+        .update(`${room.pendingNextClientSeed}:${clean}`)
+        .digest('hex')
+        .slice(0, 32);
+    } else {
+      room.pendingNextClientSeed = clean;
+    }
     return {
       success: true,
-      message: `Next round client seed updated to: ${clean}. It will take effect when the next round starts.`,
-      activeNextClientSeed: clean,
+      message: `Next round client seed updated to: ${room.pendingNextClientSeed}. It will take effect when the next round starts.`,
+      activeNextClientSeed: room.pendingNextClientSeed,
     };
   }
 
@@ -1277,6 +1296,21 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
         } catch (err: any) {
           this.logger.warn(`Failed to disconnect sockets in room ${room}: ${err?.message}`);
         }
+      }
+    }
+  }
+
+  public migrateUserSocketRooms(userId: string, oldUsername: string, newUsername: string) {
+    if (this.server) {
+      try {
+        const oldRoom = `user:${oldUsername.toLowerCase()}`;
+        const newRoom = `user:${newUsername.toLowerCase()}`;
+        this.server.in(oldRoom).socketsJoin(newRoom);
+        this.server.in(oldRoom).socketsLeave(oldRoom);
+        this.server.to(newRoom).emit('userRenamed', { oldUsername, newUsername });
+        this.logger.log(`[Socket Migration] Migrated active sockets from [${oldRoom}] to [${newRoom}]`);
+      } catch (err: any) {
+        this.logger.warn(`Failed to migrate user socket rooms: ${err?.message}`);
       }
     }
   }

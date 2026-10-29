@@ -150,6 +150,11 @@ export class AuthService implements OnModuleInit {
     this.gameService.registerMaintenanceActivateCallback(async (roomType: GameRoomType) => {
       await this.refundAllQueuedBets(roomType);
     });
+
+    // Reconcile and refund any orphaned active bets left in Redis from prior server crash/interruption
+    this.reconcileInterruptedBetsOnBoot().catch(err => {
+      this.logger.error('Failed to reconcile interrupted bets on startup', err);
+    });
   }
 
   private generateToken(): string {
@@ -618,6 +623,13 @@ export class AuthService implements OnModuleInit {
       throw new UnauthorizedException(`Account is suspended: ${user.freezeReason || 'Under review'}`);
     }
 
+    // Rate Limiting: Minimum 60-second cooldown between username changes
+    const rateKey = `rate:rename:${user.id}`;
+    const isThrottled = await this.redisService.get(rateKey);
+    if (isThrottled) {
+      throw new BadRequestException('You can only change your username once every 60 seconds.');
+    }
+
     // Security Gate: Disallow username change while player has active or queued bets in flight
     const active1 = await this.redisService.get(`active_bet:${user.id}:1`);
     const active2 = await this.redisService.get(`active_bet:${user.id}:2`);
@@ -632,11 +644,14 @@ export class AuthService implements OnModuleInit {
     user.username = clean;
     const savedUser = await this.userRepository.save(user);
 
+    await this.redisService.set(rateKey, '1', 60);
+
     try {
       const SESSION_TTL = 86400 * 7; // Preserve 7-day TTL
       await this.redisService.set(`token:${token}`, clean, SESSION_TTL);
       await this.redisService.set(`user:${clean.toLowerCase()}`, JSON.stringify(this.sanitizeUser(savedUser)), SESSION_TTL);
       await this.redisService.del(`user:${oldUsername.toLowerCase()}`);
+      this.gameService.migrateUserSocketRooms(user.id, oldUsername, clean);
     } catch (err) {
       this.logger.warn('Failed to update redis on rename', err);
     }
@@ -1162,7 +1177,7 @@ export class AuthService implements OnModuleInit {
       await this.gameService.registerRealCashout(betAmountUSD, winAmountUSD, isMarketingUser, roomType);
       this.gameService.markRealUserCashout(betRecord.id, targetMultiplier, displayWinAmount, roomType);
       this.gameService.notifyUserBalance(userObj.username, Number(userObj.balance), `🎯 Auto-Cashout Won: +$${displayWinAmount.toFixed(2)} USD`, 'USD');
-      this.gameService.notifyAutoCashoutSuccess(userObj.username, betIndex, targetMultiplier, displayWinAmount, Number(userObj.balance));
+      this.gameService.notifyAutoCashoutSuccess(userObj.username, betIndex, targetMultiplier, displayWinAmount, Number(userObj.balance), userId);
 
       const sanitized = this.sanitizeUser(userObj);
       try {
@@ -1486,6 +1501,59 @@ export class AuthService implements OnModuleInit {
     }
   }
 
+  async reconcileInterruptedBetsOnBoot(): Promise<void> {
+    for (const roomType of [GameRoomType.STANDARD, GameRoomType.MARKETING]) {
+      try {
+        const setKey = `active_bets_set:${roomType}`;
+        const activeKeys = await this.redisService.smembers(setKey);
+        if (!activeKeys || activeKeys.length === 0) continue;
+
+        this.logger.warn(
+          `[Crash Recovery] Detected ${activeKeys.length} orphan active bet(s) in [${roomType}] from prior interrupted flight. Initiating automatic player refund...`,
+        );
+
+        const rawRecords = await this.redisService.mget(activeKeys);
+        for (let i = 0; i < activeKeys.length; i++) {
+          const raw = rawRecords[i];
+          if (!raw) continue;
+          try {
+            const betRecord = JSON.parse(raw);
+            const refundAmountUSD = Number(betRecord.amountUSD || betRecord.amount || 0);
+            if (refundAmountUSD > 0 && betRecord.userId) {
+              await this.userRepository.manager.transaction(async (manager) => {
+                const lockedUser = await manager.findOne(User, {
+                  where: { id: betRecord.userId },
+                  lock: { mode: 'pessimistic_write' },
+                });
+                if (!lockedUser) return;
+                const newBalanceUSD = parseFloat((Number(lockedUser.balance) + refundAmountUSD).toFixed(6));
+                lockedUser.balance = newBalanceUSD;
+                await manager.save(lockedUser);
+
+                await manager.save(Transaction, {
+                  userId: lockedUser.id,
+                  type: 'INTERRUPTED_ROUND_REFUND',
+                  amount: refundAmountUSD,
+                  currency: 'USD',
+                  balanceAfter: newBalanceUSD,
+                });
+              });
+              this.logger.log(`[Crash Recovery] Auto-refunded $${refundAmountUSD.toFixed(2)} USD to user ${betRecord.userId} for interrupted bet slot ${betRecord.betIndex}`);
+            }
+          } catch (itemErr: any) {
+            this.logger.error(`[Crash Recovery] Error refunding interrupted bet key ${activeKeys[i]}`, itemErr);
+          }
+        }
+
+        await this.redisService.delMultiple(activeKeys);
+        await this.redisService.del(setKey);
+        this.logger.log(`[Crash Recovery] Finished reconciling interrupted bets for [${roomType}]`);
+      } catch (err: any) {
+        this.logger.error(`[Crash Recovery] Error reconciling interrupted bets on boot for ${roomType}`, err);
+      }
+    }
+  }
+
   async updateBalance(
     token: string,
     newBalance: number,
@@ -1686,6 +1754,12 @@ export class AuthService implements OnModuleInit {
       };
     }
 
+    if (user.isFrozen) {
+      throw new UnauthorizedException(
+        `Account is suspended: ${user.freezeReason || 'Under security review'}. Verification code requests are disabled.`,
+      );
+    }
+
     // Generate 6-digit cryptographically secure OTP (CSPRNG)
     const otp = crypto.randomInt(100000, 1000000).toString();
 
@@ -1746,6 +1820,12 @@ export class AuthService implements OnModuleInit {
     const user = await this.userRepository.findOne({ where: whereConditions });
     if (!user) {
       throw new BadRequestException('Account not found');
+    }
+
+    if (user.isFrozen) {
+      throw new UnauthorizedException(
+        `Account is suspended: ${user.freezeReason || 'Under security review'}. Password reset is disabled.`,
+      );
     }
 
     // Phase 3: Brute-Force Verification Lockout (Max 3 failed verification attempts)

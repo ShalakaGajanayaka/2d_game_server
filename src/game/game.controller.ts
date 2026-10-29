@@ -9,8 +9,11 @@ import {
   BadRequestException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { GameService } from './game.service';
 import { RedisService } from '../redis/redis.service';
+import { User } from '../auth/entities/user.entity';
 import * as crypto from 'crypto';
 
 @Controller('game/provably-fair')
@@ -18,6 +21,8 @@ export class GameController {
   constructor(
     private readonly gameService: GameService,
     private readonly redisService: RedisService,
+    @InjectRepository(User)
+    private readonly userRepo: Repository<User>,
   ) {}
 
   @Get('current')
@@ -42,8 +47,18 @@ export class GameController {
       throw new UnauthorizedException('Invalid or expired session');
     }
 
-    if (!body?.clientSeed) {
-      throw new BadRequestException('Property "clientSeed" is required in request body.');
+    const user = await this.userRepo.findOne({ where: { username } });
+    if (!user) {
+      throw new UnauthorizedException('User account not found');
+    }
+    if (user.isFrozen) {
+      throw new UnauthorizedException(
+        `Account is suspended: ${user.freezeReason || 'Under security review'}. Provably fair modifications are disabled.`,
+      );
+    }
+
+    if (!body?.clientSeed || typeof body.clientSeed !== 'string') {
+      throw new BadRequestException('Property "clientSeed" must be a non-empty string in request body.');
     }
 
     // Rate-limit seed rotation: 1 rotation per 10 seconds per authenticated user

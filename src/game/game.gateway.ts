@@ -249,7 +249,16 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
         }
 
         this.logger.log(`Socket [${client.id}] subscribed to private room: ${userRoom} (marketing: ${isMarketing})`);
-        const response = { success: true, username, isMarketing, room: isMarketing ? GameRoomType.MARKETING : GameRoomType.STANDARD };
+        const balance = dbUser ? Number(dbUser.balance) : 0;
+        const currency = dbUser?.currency || 'USD';
+        const response = {
+          success: true,
+          username,
+          isMarketing,
+          room: isMarketing ? GameRoomType.MARKETING : GameRoomType.STANDARD,
+          balance,
+          currency,
+        };
         client.emit('userSubscribed', response);
         return response;
       } else {
