@@ -6,6 +6,9 @@ import {
   RequestResetOtpDto,
   ResetPasswordDto,
   RenameUserDto,
+  PlaceGameBetDto,
+  CancelGameBetDto,
+  CashoutGameBetDto,
 } from './dto/auth.dto';
 
 @Controller('auth')
@@ -87,7 +90,7 @@ export class AuthController {
   @Post('game-bet')
   async placeGameBet(
     @Headers('authorization') authHeader: string,
-    @Body() body: { token?: string; betIndex: number; amount: number; autoCashout?: number | null },
+    @Body() body: PlaceGameBetDto,
   ) {
     const token = this.extractToken(authHeader, body?.token);
     return this.authService.placeGameBet(
@@ -101,16 +104,16 @@ export class AuthController {
   @Post('game-cancel-bet')
   async cancelGameBet(
     @Headers('authorization') authHeader: string,
-    @Body() body: { token?: string; betIndex: number },
+    @Body() body: CancelGameBetDto,
   ) {
     const token = this.extractToken(authHeader, body?.token);
-    return this.authService.cancelGameBet(token, Number(body.betIndex));
+    return this.authService.cancelGameBet(token, Number(body.betIndex), body?.target);
   }
 
   @Post('game-cashout')
   async cashoutGameBet(
     @Headers('authorization') authHeader: string,
-    @Body() body: { token?: string; betIndex: number },
+    @Body() body: CashoutGameBetDto,
   ) {
     const token = this.extractToken(authHeader, body?.token);
     return this.authService.cashoutGameBet(token, Number(body.betIndex));

@@ -558,7 +558,7 @@ export class AuthService implements OnModuleInit {
     };
   }
 
-  async getProfile(token: string): Promise<UserProfile & { activeBets?: any }> {
+  async getProfile(token: string): Promise<UserProfile & { activeBets?: any; queuedBets?: any }> {
     let username: string | null = null;
     try {
       username = await this.redisService.get(`token:${token}`);
@@ -577,11 +577,17 @@ export class AuthService implements OnModuleInit {
     try {
       const rawBet1 = await this.redisService.get(`active_bet:${user.id}:1`);
       const rawBet2 = await this.redisService.get(`active_bet:${user.id}:2`);
+      const rawQueued1 = await this.redisService.get(`queued_bet:${user.id}:1`);
+      const rawQueued2 = await this.redisService.get(`queued_bet:${user.id}:2`);
       return {
         ...sanitized,
         activeBets: {
           slot1: rawBet1 ? JSON.parse(rawBet1) : null,
           slot2: rawBet2 ? JSON.parse(rawBet2) : null,
+        },
+        queuedBets: {
+          slot1: rawQueued1 ? JSON.parse(rawQueued1) : null,
+          slot2: rawQueued2 ? JSON.parse(rawQueued2) : null,
         },
       };
     } catch {
@@ -701,7 +707,10 @@ export class AuthService implements OnModuleInit {
     }
 
     let validAutoCashout: number | null = null;
-    if (autoCashout && typeof autoCashout === 'number' && autoCashout >= 1.01) {
+    if (autoCashout && typeof autoCashout === 'number' && Number.isFinite(autoCashout) && autoCashout >= 1.01) {
+      if (autoCashout > 10000.00) {
+        throw new BadRequestException('Maximum auto-cashout multiplier is 10,000.00x');
+      }
       validAutoCashout = parseFloat(Number(autoCashout).toFixed(2));
     }
 
@@ -774,7 +783,8 @@ export class AuthService implements OnModuleInit {
         });
       });
 
-      const betId = `real_${savedUser!.id}_${betIndex}_${Date.now()}`;
+      const betNonce = crypto.randomBytes(8).toString('hex');
+      const betId = `real_${betNonce}_${betIndex}_${Date.now()}`;
       const betRecord = {
         id: betId,
         userId: savedUser!.id,
@@ -854,7 +864,7 @@ export class AuthService implements OnModuleInit {
     }
   }
 
-  async cancelGameBet(token: string, betIndex: number) {
+  async cancelGameBet(token: string, betIndex: number, target?: 'active' | 'queued') {
     if (betIndex !== 1 && betIndex !== 2) {
       throw new BadRequestException('Invalid bet slot index (must be 1 or 2)');
     }
@@ -881,7 +891,30 @@ export class AuthService implements OnModuleInit {
         throw new BadRequestException('No active or queued bet found in this slot to cancel');
       }
 
-      const isQueued = !rawActive && !!rawQueued;
+      // Explicit target resolution or smart in-flight resolution
+      let isQueued = false;
+      if (target === 'queued') {
+        if (!rawQueued) {
+          throw new BadRequestException('No queued bet found in this slot to cancel');
+        }
+        isQueued = true;
+      } else if (target === 'active') {
+        if (!rawActive) {
+          throw new BadRequestException('No active bet found in this slot to cancel');
+        }
+        isQueued = false;
+      } else {
+        // Auto-detect: if game is currently PLAYING/CRASHED and a queued bet exists, user wants to cancel the queued bet!
+        const isGamePlaying = this.gameService.getStatus(roomType) !== GameStatus.WAITING;
+        if (isGamePlaying && rawQueued) {
+          isQueued = true;
+        } else if (!rawActive && rawQueued) {
+          isQueued = true;
+        } else {
+          isQueued = false;
+        }
+      }
+
       const raw = isQueued ? rawQueued : rawActive;
 
       // Active bets can only be cancelled during the countdown phase
@@ -1389,6 +1422,37 @@ export class AuthService implements OnModuleInit {
           const activeKey = `active_bet:${betRecord.userId}:${betRecord.betIndex}`;
 
           const user = await this.userRepository.findOne({ where: { id: betRecord.userId } });
+          if (!user) {
+            this.logger.warn(`[Next-Round Queue][${roomType}] User ${betRecord.userId} not found. Skipping activation.`);
+            continue;
+          }
+
+          if (user.isFrozen) {
+            this.logger.warn(
+              `[Next-Round Queue][${roomType}] User ${user.username} is suspended (${user.freezeReason || 'Frozen'}). Auto-refunding queued bet #${betRecord.betIndex}.`,
+            );
+            const refundAmountUSD = Number(betRecord.amountUSD || betRecord.amount || 0);
+            await this.userRepository.manager.transaction(async (manager) => {
+              const lockedUser = await manager.findOne(User, {
+                where: { id: user.id },
+                lock: { mode: 'pessimistic_write' },
+              });
+              if (!lockedUser) return;
+              const newBalanceUSD = parseFloat((Number(lockedUser.balance) + refundAmountUSD).toFixed(6));
+              lockedUser.balance = newBalanceUSD;
+              await manager.save(lockedUser);
+              await manager.save(Transaction, {
+                userId: lockedUser.id,
+                type: 'CANCEL_QUEUED_BET_SUSPENDED',
+                amount: refundAmountUSD,
+                currency: 'USD',
+                multiplier: null,
+                balanceAfter: newBalanceUSD,
+              });
+            });
+            continue;
+          }
+
           const isMarketing = !!user?.isMarketing;
           const isMarketingAutoWin = isMarketing && !!user?.isMarketingAutoWin;
 

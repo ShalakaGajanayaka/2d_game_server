@@ -251,6 +251,26 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
         this.logger.log(`Socket [${client.id}] subscribed to private room: ${userRoom} (marketing: ${isMarketing})`);
         const balance = dbUser ? Number(dbUser.balance) : 0;
         const currency = dbUser?.currency || 'USD';
+
+        let activeBets: any = null;
+        let queuedBets: any = null;
+        if (dbUser?.id) {
+          try {
+            const rawBet1 = await this.redisService.get(`active_bet:${dbUser.id}:1`);
+            const rawBet2 = await this.redisService.get(`active_bet:${dbUser.id}:2`);
+            const rawQueued1 = await this.redisService.get(`queued_bet:${dbUser.id}:1`);
+            const rawQueued2 = await this.redisService.get(`queued_bet:${dbUser.id}:2`);
+            activeBets = {
+              slot1: rawBet1 ? JSON.parse(rawBet1) : null,
+              slot2: rawBet2 ? JSON.parse(rawBet2) : null,
+            };
+            queuedBets = {
+              slot1: rawQueued1 ? JSON.parse(rawQueued1) : null,
+              slot2: rawQueued2 ? JSON.parse(rawQueued2) : null,
+            };
+          } catch {}
+        }
+
         const response = {
           success: true,
           username,
@@ -258,6 +278,8 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
           room: isMarketing ? GameRoomType.MARKETING : GameRoomType.STANDARD,
           balance,
           currency,
+          activeBets,
+          queuedBets,
         };
         client.emit('userSubscribed', response);
         return response;
