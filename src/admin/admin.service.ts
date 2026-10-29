@@ -1399,6 +1399,9 @@ export class AdminService implements OnModuleInit {
       user.flaggedReason = `Ledger discrepancy: $${varianceUSD.toFixed(2)} USD`;
       await this.userRepo.save(user);
       this.logger.error(`🚨 FRAUD ALARM: User ${user.username} frozen! Balance: $${currentBalanceUSD} USD, Ledger: $${calculatedBalanceUSD} USD, Variance: $${varianceUSD}`);
+      try {
+        this.gameService.kickUserSockets(user, user.freezeReason);
+      } catch {}
     } else if (isClean && user.isFrozen && user.freezeReason?.includes('Automated Security Audit: Ledger variance')) {
       // Auto-recovery: User was suspended due to a false-positive ledger variance
       user.isFrozen = false;
@@ -1562,14 +1565,12 @@ export class AdminService implements OnModuleInit {
     }
 
     try {
-      this.gameService.notifyUserBalance(
+      this.gameService.kickUserSockets(
         user,
-        Number(user.balance),
         `Account suspended: ${reason || 'Suspended by Administrator'}`,
-        user.currency,
       );
     } catch (err: any) {
-      this.logger.warn(`Failed to notify user socket of freeze: ${err?.message}`);
+      this.logger.warn(`Failed to kick frozen user sockets: ${err?.message}`);
     }
 
     this.logger.warn(`User ${user.username} frozen by ${adminUser}: ${reason}`);

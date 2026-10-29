@@ -1240,6 +1240,35 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  public kickUserSockets(
+    target: string | { id?: string; username?: string; email?: string },
+    reason?: string,
+  ) {
+    if (this.server) {
+      const username = typeof target === 'string' ? target : (target?.username || '');
+      const userId = typeof target === 'object' ? target?.id : undefined;
+
+      const payload = {
+        reason: reason || 'Account suspended under security review.',
+        isFrozen: true,
+        timestamp: Date.now(),
+      };
+
+      const targetRooms = new Set<string>();
+      if (userId) targetRooms.add(`user:${userId}`);
+      if (username) targetRooms.add(`user:${username.toLowerCase()}`);
+
+      for (const room of targetRooms) {
+        this.server.to(room).emit('accountSuspended', payload);
+        try {
+          this.server.in(room).disconnectSockets(true);
+        } catch (err: any) {
+          this.logger.warn(`Failed to disconnect sockets in room ${room}: ${err?.message}`);
+        }
+      }
+    }
+  }
+
   public notifyNewDeposit(deposit: any) {
     if (this.server) {
       this.server.to('admin_room').emit('newDepositSubmitted', {

@@ -72,6 +72,15 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
           const dbUser = await this.userRepo.findOne({
             where: [{ username: ILike(username) }, { email: ILike(username) }],
           });
+          if (dbUser?.isFrozen) {
+            this.logger.warn(`Suspended user [${username}] attempted WebSocket connection. Disconnecting socket.`);
+            client.emit('accountSuspended', {
+              reason: dbUser.freezeReason || 'Account suspended under security review.',
+              isFrozen: true,
+            });
+            client.disconnect(true);
+            return;
+          }
           if (dbUser && dbUser.isMarketing) {
             await client.join('room:marketing');
             await client.join(`user:${username.toLowerCase()}`);
@@ -146,38 +155,64 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
         client.leave('admin_room');
         client.leave('streamer_radar_room');
 
-        // Join username room
-        const userRoom = `user:${username.toLowerCase()}`;
-        client.join(userRoom);
-
-        // Authoritative Database Verification for Marketing Role
+        // Authoritative Database Verification for Marketing Role & Suspension Status
         let isMarketing = false;
         let dbUser: User | null = null;
         try {
           dbUser = await this.userRepo.findOne({
             where: [{ username: ILike(username) }, { email: ILike(username) }],
           });
-          if (dbUser) {
-            isMarketing = !!dbUser.isMarketing;
-            client.join(`user:${dbUser.id}`);
-          }
         } catch (dbErr) {
           this.logger.warn(`Database user lookup fallback for ${username}: ${dbErr?.message}`);
         }
 
-        // Fallback to Redis cache if DB lookup didn't resolve user
-        if (!dbUser) {
+        let isFrozen = false;
+        let freezeReason: string | null = null;
+
+        if (dbUser) {
+          isMarketing = !!dbUser.isMarketing;
+          isFrozen = !!dbUser.isFrozen;
+          freezeReason = dbUser.freezeReason;
+        } else {
+          // Fallback to Redis cache if DB lookup didn't resolve user
           const userJson = await this.redisService.get(`user:${username.toLowerCase()}`);
           if (userJson) {
-            const userObj = JSON.parse(userJson);
-            if (userObj?.id) {
-              client.join(`user:${userObj.id}`);
-            }
-            if (userObj?.isMarketing) {
-              isMarketing = true;
-            }
+            try {
+              const userObj = JSON.parse(userJson);
+              if (userObj?.isMarketing) isMarketing = true;
+              if (userObj?.isFrozen) {
+                isFrozen = true;
+                freezeReason = userObj?.freezeReason;
+              }
+            } catch {}
           }
-        } else {
+        }
+
+        // SECURITY GATE: Suspended / Frozen Account Handling
+        if (isFrozen) {
+          this.logger.warn(
+            `[Security Gate] Suspended account [${username}] attempted socket subscription: ${freezeReason || 'Under security review'}`,
+          );
+          for (const room of client.rooms) {
+            client.leave(room);
+          }
+          const failResponse = {
+            success: false,
+            error: `Account is suspended: ${freezeReason || 'Under security review'}`,
+            isFrozen: true,
+          };
+          client.emit('accountSuspended', failResponse);
+          client.emit('userSubscribed', failResponse);
+          client.disconnect(true);
+          return failResponse;
+        }
+
+        // Join username room
+        const userRoom = `user:${username.toLowerCase()}`;
+        client.join(userRoom);
+
+        if (dbUser) {
+          client.join(`user:${dbUser.id}`);
           // Synchronize Redis with authoritative DB flags
           try {
             const userJson = await this.redisService.get(`user:${username.toLowerCase()}`);
@@ -185,8 +220,19 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection {
             userObj.isMarketing = isMarketing;
             userObj.isMarketingAutoWin = !!dbUser.isMarketingAutoWin;
             userObj.id = dbUser.id;
+            userObj.isFrozen = false;
             await this.redisService.set(`user:${username.toLowerCase()}`, JSON.stringify(userObj), 86400 * 7);
           } catch {}
+        } else {
+          const userJson = await this.redisService.get(`user:${username.toLowerCase()}`);
+          if (userJson) {
+            try {
+              const userObj = JSON.parse(userJson);
+              if (userObj?.id) {
+                client.join(`user:${userObj.id}`);
+              }
+            } catch {}
+          }
         }
 
         // Dynamic Room Routing: Marketing accounts route to room:marketing; real clients strictly to room:standard
