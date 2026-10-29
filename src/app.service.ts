@@ -38,7 +38,7 @@ export class AppService {
       }
     } catch (err: any) {
       this.logger.error('PostgreSQL health check probe failed', err);
-      pgStatus = `error: ${err.message}`;
+      pgStatus = 'error: connection_failed';
     }
 
     // 2. Redis Key-Value Store Diagnostics & Latency
@@ -51,7 +51,7 @@ export class AppService {
       redisStatus = 'connected';
     } catch (err: any) {
       this.logger.error('Redis health check probe failed', err);
-      redisStatus = `error: ${err.message}`;
+      redisStatus = 'error: connection_failed';
     }
 
     const isHealthy = pgStatus === 'connected' && redisStatus === 'connected';

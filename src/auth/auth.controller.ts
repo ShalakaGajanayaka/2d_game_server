@@ -15,11 +15,10 @@ export class AuthController {
   @Get('detect-currency')
   async detectCurrency(
     @Req() req: any,
-    @Query('ip') ip?: string,
     @Query('tz') tz?: string,
     @Query('offset') offset?: string,
   ) {
-    return this.authService.detectCurrency(req, ip, tz, offset);
+    return this.authService.detectCurrency(req, undefined, tz, offset);
   }
 
   @Get('check-phone')

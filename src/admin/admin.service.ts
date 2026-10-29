@@ -137,26 +137,38 @@ export class AdminService implements OnModuleInit {
       );
     }
 
-    if (paymentMethod === 'bank_transfer') {
+    const cleanPaymentMethod = (paymentMethod || '').trim().toLowerCase();
+    if (cleanPaymentMethod === 'bank_transfer') {
       throw new BadRequestException('Commercial Bank deposits are temporarily disabled. Please use iPay or UPay.');
+    }
+    const ALLOWED_DEPOSIT_METHODS = ['binance_pay', 'binance', 'ipay', 'upay'];
+    if (!cleanPaymentMethod || !ALLOWED_DEPOSIT_METHODS.includes(cleanPaymentMethod)) {
+      throw new BadRequestException(`Unsupported payment method. Allowed: ${ALLOWED_DEPOSIT_METHODS.join(', ')}`);
     }
 
     const cleanAmount = Number(amount);
+    if (isNaN(cleanAmount) || !Number.isFinite(cleanAmount) || cleanAmount <= 0) {
+      throw new BadRequestException('Invalid deposit amount. Must be a valid positive number.');
+    }
+
     const targetCurrency = (currency || 'USD').toUpperCase();
     const rate = PLATFORM_EXCHANGE_RATES[targetCurrency] || 1.0;
     const usdtEquivalent = cleanAmount / rate;
 
     // Minimum 5 USDT / USD validation across all supported currencies
-    if (!cleanAmount || usdtEquivalent < 4.99) {
+    if (usdtEquivalent < 4.99) {
       const minLocal = (5.0 * rate).toFixed(2);
       throw new BadRequestException(
         `Minimum deposit amount is 5 USDT (approx ${targetCurrency} ${minLocal})`,
       );
     }
+    if (usdtEquivalent > 50000) {
+      throw new BadRequestException('Maximum single deposit limit is 50,000 USDT.');
+    }
 
     const cleanRef = (referenceNumber || '').trim();
-    if (!cleanRef || cleanRef.length < 3) {
-      throw new BadRequestException('Please enter a valid Transaction Reference or Slip Number');
+    if (!cleanRef || cleanRef.length < 3 || cleanRef.length > 100) {
+      throw new BadRequestException('Please enter a valid Transaction Reference or Slip Number (3-100 characters)');
     }
 
     // 1. User submission throttling / spam protection (1 deposit per 3 seconds per user)
@@ -738,21 +750,47 @@ export class AdminService implements OnModuleInit {
     payoutDetails: any,
     saveDetails?: boolean,
   ): Promise<WithdrawalRequest> {
+    const ALLOWED_WITHDRAWAL_METHODS = ['binance_usdt', 'binance', 'ipay', 'upay', 'bank_transfer'];
+    let cleanMethod = (method || '').trim().toLowerCase();
+    if (cleanMethod === 'binance') {
+      cleanMethod = 'binance_usdt';
+    }
+    if (!cleanMethod || !ALLOWED_WITHDRAWAL_METHODS.includes(cleanMethod)) {
+      throw new BadRequestException(`Unsupported withdrawal method. Allowed: binance_usdt, ipay, upay, bank_transfer`);
+    }
+
+    if (['__proto__', 'constructor', 'prototype'].includes(cleanMethod)) {
+      throw new BadRequestException('Invalid withdrawal method name');
+    }
+
     const cleanAmount = Number(amount);
+    if (isNaN(cleanAmount) || !Number.isFinite(cleanAmount) || cleanAmount <= 0) {
+      throw new BadRequestException('Invalid withdrawal amount. Must be a valid positive number.');
+    }
+
     const targetCurrency = (currency || 'USD').toUpperCase();
     const rate = PLATFORM_EXCHANGE_RATES[targetCurrency] || 1.0;
     const usdtEquivalent = cleanAmount / rate;
 
     // Minimum 7 USDT validation across all supported currencies
-    if (!cleanAmount || usdtEquivalent < 6.99) {
+    if (usdtEquivalent < 6.99) {
       const minLocal = (7.0 * rate).toFixed(2);
       throw new BadRequestException(
         `Minimum withdrawal amount is 7 USDT (approx ${targetCurrency} ${minLocal})`,
       );
     }
 
+    if (usdtEquivalent > 25000) {
+      throw new BadRequestException('Maximum single withdrawal limit is 25,000 USDT.');
+    }
+
     if (!payoutDetails) {
       throw new BadRequestException('Payout details are required');
+    }
+
+    const detailsString = typeof payoutDetails === 'string' ? payoutDetails : JSON.stringify(payoutDetails);
+    if (detailsString.length > 4096) {
+      throw new BadRequestException('Payout details payload exceeds maximum allowed size (4KB)');
     }
 
     const amountUSD = parseFloat((cleanAmount / rate).toFixed(6));
@@ -870,9 +908,16 @@ export class AdminService implements OnModuleInit {
         lockedUser.balance = newBalanceUSD;
 
         if (saveDetails) {
-          const currentDetails = lockedUser.savedWithdrawalDetails || {};
-          currentDetails[method] = payoutDetails;
-          lockedUser.savedWithdrawalDetails = { ...currentDetails };
+          const currentDetails = (lockedUser.savedWithdrawalDetails && typeof lockedUser.savedWithdrawalDetails === 'object')
+            ? { ...lockedUser.savedWithdrawalDetails }
+            : {};
+          delete currentDetails.__proto__;
+          delete currentDetails.constructor;
+          delete currentDetails.prototype;
+          if (ALLOWED_WITHDRAWAL_METHODS.includes(cleanMethod)) {
+            currentDetails[cleanMethod] = payoutDetails;
+            lockedUser.savedWithdrawalDetails = currentDetails;
+          }
         }
 
         savedUser = await manager.save(lockedUser);
@@ -888,14 +933,13 @@ export class AdminService implements OnModuleInit {
         });
 
         // Create and save WithdrawalRequest record inside same ACID transaction
-        const detailsString = typeof payoutDetails === 'string' ? payoutDetails : JSON.stringify(payoutDetails);
         const newWithdrawal = manager.create(WithdrawalRequest, {
           userId: savedUser.id,
           username: savedUser.username,
           email: email || savedUser.email || undefined,
           amount: cleanAmount,
           currency: targetCurrency,
-          method: method || 'bank_transfer',
+          method: cleanMethod,
           payoutDetails: detailsString,
           status: WithdrawalStatus.PENDING,
           isMarketing: isMarketingUser,

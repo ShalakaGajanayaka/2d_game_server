@@ -555,7 +555,9 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
     const room = this.getRoom(roomType);
     room.currentRoundBets.unshift(bet);
     if (this.server) {
-      this.server.to(`room:${roomType}`).emit('newLiveBet', bet);
+      // Strip internal database UUID userId before broadcasting to room spectators
+      const { userId, ...publicBet } = bet;
+      this.server.to(`room:${roomType}`).emit('newLiveBet', publicBet);
     }
   }
 
@@ -1207,7 +1209,12 @@ export class GameService implements OnModuleInit, OnModuleDestroy {
       targetCrashPoint: roomType === GameRoomType.MARKETING ? room.crashPoint : null,
       serverTime: Date.now(),
       maintenance: this.getMaintenanceStatus(),
-      bets: includeFullBets ? room.currentRoundBets : null,
+      bets: includeFullBets
+        ? room.currentRoundBets.map(b => {
+            const { userId, ...publicBet } = b;
+            return publicBet;
+          })
+        : null,
       provablyFair: {
         roundNumber: room.roundNumber,
         serverSeedHash: room.currentServerSeedHash,

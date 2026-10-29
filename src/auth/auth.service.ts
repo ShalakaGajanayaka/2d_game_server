@@ -162,6 +162,19 @@ export class AuthService implements OnModuleInit {
       await this.redisService.set(`token:${token}`, user.username, TTL);
       await this.redisService.set(`token_user:${token}`, user.id, TTL);
       await this.redisService.sadd(`user_sessions:${user.id}`, token);
+      await this.redisService.expire(`user_sessions:${user.id}`, 86400 * 14); // 14-day auto-expiry
+
+      // Prune dead sessions if user session set has grown beyond 10
+      const existingTokens = await this.redisService.smembers(`user_sessions:${user.id}`);
+      if (existingTokens && existingTokens.length > 10) {
+        for (const tok of existingTokens) {
+          const exists = await this.redisService.get(`token:${tok}`);
+          if (!exists) {
+            await this.redisService.srem(`user_sessions:${user.id}`, tok);
+          }
+        }
+      }
+
       await this.redisService.set(`user:${user.username.toLowerCase()}`, JSON.stringify(this.sanitizeUser(user)), TTL);
       if (user.email) {
         await this.redisService.set(`user:${user.email.toLowerCase()}`, JSON.stringify(this.sanitizeUser(user)), TTL);
@@ -620,8 +633,9 @@ export class AuthService implements OnModuleInit {
     const savedUser = await this.userRepository.save(user);
 
     try {
-      await this.redisService.set(`token:${token}`, clean);
-      await this.redisService.set(`user:${clean.toLowerCase()}`, JSON.stringify(this.sanitizeUser(savedUser)));
+      const SESSION_TTL = 86400 * 7; // Preserve 7-day TTL
+      await this.redisService.set(`token:${token}`, clean, SESSION_TTL);
+      await this.redisService.set(`user:${clean.toLowerCase()}`, JSON.stringify(this.sanitizeUser(savedUser)), SESSION_TTL);
       await this.redisService.del(`user:${oldUsername.toLowerCase()}`);
     } catch (err) {
       this.logger.warn('Failed to update redis on rename', err);
@@ -773,7 +787,6 @@ export class AuthService implements OnModuleInit {
         await this.gameService.registerRealBet(betAmountUSD, isMarketingUser, roomType);
         this.gameService.addRealUserBet({
           id: betId,
-          userId: savedUser!.id,
           name: savedUser!.username,
           bet: cleanAmount,
           targetMultiplier: validAutoCashout || 0,
@@ -809,7 +822,7 @@ export class AuthService implements OnModuleInit {
 
       const sanitized = this.sanitizeUser(savedUser!);
       try {
-        await this.redisService.set(`user:${savedUser!.username.toLowerCase()}`, JSON.stringify(sanitized));
+        await this.redisService.set(`user:${savedUser!.username.toLowerCase()}`, JSON.stringify(sanitized), 86400 * 7);
       } catch {}
 
       return {
@@ -905,7 +918,7 @@ export class AuthService implements OnModuleInit {
 
       const sanitized = this.sanitizeUser(savedUser!);
       try {
-        await this.redisService.set(`user:${savedUser!.username.toLowerCase()}`, JSON.stringify(sanitized));
+        await this.redisService.set(`user:${savedUser!.username.toLowerCase()}`, JSON.stringify(sanitized), 86400 * 7);
       } catch {}
 
       return {
@@ -1034,7 +1047,7 @@ export class AuthService implements OnModuleInit {
 
       const sanitized = this.sanitizeUser(savedUser!);
       try {
-        await this.redisService.set(`user:${savedUser!.username.toLowerCase()}`, JSON.stringify(sanitized));
+        await this.redisService.set(`user:${savedUser!.username.toLowerCase()}`, JSON.stringify(sanitized), 86400 * 7);
       } catch {}
 
       return {
@@ -1153,7 +1166,7 @@ export class AuthService implements OnModuleInit {
 
       const sanitized = this.sanitizeUser(userObj);
       try {
-        await this.redisService.set(`user:${userObj.username.toLowerCase()}`, JSON.stringify(sanitized));
+        await this.redisService.set(`user:${userObj.username.toLowerCase()}`, JSON.stringify(sanitized), 86400 * 7);
       } catch {}
 
       this.logger.log(`[Auto-Cashout Engine][${roomType}] Successfully executed auto-cashout for ${userObj.username} (Slot ${betIndex}): +$${displayWinAmount.toFixed(2)} USD at ${targetMultiplier}x`);
@@ -1242,7 +1255,7 @@ export class AuthService implements OnModuleInit {
 
       const sanitized = this.sanitizeUser(userObj);
       try {
-        await this.redisService.set(`user:${userObj.username.toLowerCase()}`, JSON.stringify(sanitized));
+        await this.redisService.set(`user:${userObj.username.toLowerCase()}`, JSON.stringify(sanitized), 86400 * 7);
       } catch {}
 
       this.logger.log(`[Marketing Auto-Win] Successfully cashed out for ${userObj.username}: +${userObj.currency} ${displayWinAmount} ($${winAmountUSD} USD) at ${currentMultiplier}x`);
@@ -1374,7 +1387,6 @@ export class AuthService implements OnModuleInit {
           await this.gameService.registerRealBet(betRecord.amountUSD, isMarketing, roomType);
           this.gameService.addRealUserBet({
             id: betRecord.id,
-            userId: betRecord.userId,
             name: betRecord.username,
             bet: betRecord.amount,
             targetMultiplier: betRecord.autoCashout || 0,
@@ -1820,13 +1832,13 @@ export class AuthService implements OnModuleInit {
 
   detectCurrency(
     req: any,
-    queryIp?: string,
-    queryTz?: string,
-    queryOffset?: string,
+    _queryIp?: string,
+    _queryTz?: string,
+    _queryOffset?: string,
   ): { ip: string; country: string; currency: string; isLocal: boolean; source: string } {
-    let clientIp = (queryIp || '').trim();
+    let clientIp = '';
 
-    if (!clientIp && req) {
+    if (req) {
       const forwarded = req.headers
         ? (req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.headers['x-real-ip'])
         : null;
@@ -1835,10 +1847,9 @@ export class AuthService implements OnModuleInit {
       } else if (Array.isArray(forwarded) && forwarded.length > 0) {
         clientIp = forwarded[0].trim();
       }
-    }
-
-    if (!clientIp && req) {
-      clientIp = req.socket?.remoteAddress || req.ip || '';
+      if (!clientIp) {
+        clientIp = (req.ip || req.socket?.remoteAddress || '').toString().trim();
+      }
     }
 
     if (clientIp.startsWith('::ffff:')) {
