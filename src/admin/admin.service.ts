@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException, ConflictException, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException, ConflictException, UnauthorizedException, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike, MoreThan } from 'typeorm';
 import { User } from '../auth/entities/user.entity';
@@ -127,6 +127,16 @@ export class AdminService implements OnModuleInit {
     paymentMethod: string,
     referenceNumber: string,
   ): Promise<DepositRequest> {
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('User account not found');
+    }
+    if (user.isFrozen) {
+      throw new UnauthorizedException(
+        `Account is suspended: ${user.freezeReason || 'Under security review'}. Deposit operations are disabled.`,
+      );
+    }
+
     if (paymentMethod === 'bank_transfer') {
       throw new BadRequestException('Commercial Bank deposits are temporarily disabled. Please use iPay or UPay.');
     }
@@ -800,6 +810,12 @@ export class AdminService implements OnModuleInit {
           throw new NotFoundException('User account not found');
         }
 
+        if (lockedUser.isFrozen) {
+          throw new UnauthorizedException(
+            `Account is suspended: ${lockedUser.freezeReason || 'Under security review'}. Withdrawal operations are disabled.`,
+          );
+        }
+
         const isMarketingUser = !!lockedUser.isMarketing;
 
         // AML Wagering Policy (1x Turnover / Minimum 1 Bet Gate):
@@ -1166,6 +1182,12 @@ export class AdminService implements OnModuleInit {
           lock: { mode: 'pessimistic_write' },
         });
         if (!lockedUser) throw new NotFoundException('User account not found');
+
+        if (lockedUser.isFrozen) {
+          throw new UnauthorizedException(
+            `Account is suspended: ${lockedUser.freezeReason || 'Under security review'}. Financial operations are disabled.`,
+          );
+        }
 
         const withdrawCurrency = (lockedWithdrawal.currency || 'USD').toUpperCase();
         const rate = PLATFORM_EXCHANGE_RATES[withdrawCurrency] || 1.0;

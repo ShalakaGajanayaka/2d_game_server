@@ -43,24 +43,33 @@ export class AdminController {
     };
   }
 
+  private extractToken(authHeader?: string, bodyToken?: string): string {
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      return authHeader.replace('Bearer ', '').trim();
+    }
+    if (bodyToken && typeof bodyToken === 'string' && bodyToken.trim()) {
+      return bodyToken.trim();
+    }
+    throw new UnauthorizedException('Authentication token required');
+  }
+
   @Post('deposit-request')
   async submitClientDeposit(
+    @Headers('authorization') authHeader: string | undefined,
     @Body()
     body: {
-      token: string;
+      token?: string;
       amount: number;
       currency?: string;
       paymentMethod: string;
       referenceNumber: string;
     },
   ) {
-    if (!body.token) {
-      throw new UnauthorizedException('Please log in to submit a deposit request');
-    }
+    const token = this.extractToken(authHeader, body?.token);
 
     let username: string | null = null;
     try {
-      username = await this.redisService.get(`token:${body.token}`);
+      username = await this.redisService.get(`token:${token}`);
     } catch {}
 
     if (!username) {
@@ -70,6 +79,13 @@ export class AdminController {
     const user = await this.userRepo.findOne({ where: { username } });
     if (!user) {
       throw new UnauthorizedException('User account not found');
+    }
+
+    // SECURITY GATE: Block suspended/frozen accounts from initiating deposits
+    if (user.isFrozen) {
+      throw new UnauthorizedException(
+        `Account is suspended: ${user.freezeReason || 'Under security review'}. Deposit operations are disabled.`,
+      );
     }
 
     // SECURITY PATCH: Lock currency strictly to immutable user account currency to prevent arbitrage / spoofing
@@ -94,9 +110,10 @@ export class AdminController {
 
   @Post('withdrawal-request')
   async submitClientWithdrawal(
+    @Headers('authorization') authHeader: string | undefined,
     @Body()
     body: {
-      token: string;
+      token?: string;
       amount: number;
       currency?: string;
       method: string;
@@ -104,13 +121,11 @@ export class AdminController {
       saveDetails?: boolean;
     },
   ) {
-    if (!body.token) {
-      throw new UnauthorizedException('Please log in to submit a withdrawal request');
-    }
+    const token = this.extractToken(authHeader, body?.token);
 
     let username: string | null = null;
     try {
-      username = await this.redisService.get(`token:${body.token}`);
+      username = await this.redisService.get(`token:${token}`);
     } catch {}
 
     if (!username) {
@@ -120,6 +135,13 @@ export class AdminController {
     const user = await this.userRepo.findOne({ where: { username } });
     if (!user) {
       throw new UnauthorizedException('User account not found');
+    }
+
+    // SECURITY GATE: Block suspended/frozen accounts from initiating withdrawals
+    if (user.isFrozen) {
+      throw new UnauthorizedException(
+        `Account is suspended: ${user.freezeReason || 'Under security review'}. Withdrawal operations are disabled.`,
+      );
     }
 
     // SECURITY PATCH: Lock currency strictly to immutable user account currency to prevent arbitrage / spoofing
@@ -145,18 +167,17 @@ export class AdminController {
 
   @Post('withdrawal-cancel')
   async cancelClientWithdrawal(
-    @Body() body: { token: string; withdrawalId: string },
+    @Headers('authorization') authHeader: string | undefined,
+    @Body() body: { token?: string; withdrawalId: string },
   ) {
-    if (!body.token) {
-      throw new UnauthorizedException('Please log in to cancel a withdrawal request');
-    }
-    if (!body.withdrawalId) {
+    const token = this.extractToken(authHeader, body?.token);
+    if (!body?.withdrawalId) {
       throw new BadRequestException('Withdrawal ID is required');
     }
 
     let username: string | null = null;
     try {
-      username = await this.redisService.get(`token:${body.token}`);
+      username = await this.redisService.get(`token:${token}`);
     } catch {}
 
     if (!username) {
@@ -166,6 +187,12 @@ export class AdminController {
     const user = await this.userRepo.findOne({ where: { username } });
     if (!user) {
       throw new UnauthorizedException('User account not found');
+    }
+
+    if (user.isFrozen) {
+      throw new UnauthorizedException(
+        `Account is suspended: ${user.freezeReason || 'Under security review'}. Financial operations are disabled.`,
+      );
     }
 
     const result = await this.adminService.clientCancelWithdrawal(user.id, body.withdrawalId);
